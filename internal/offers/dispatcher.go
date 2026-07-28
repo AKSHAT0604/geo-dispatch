@@ -9,6 +9,7 @@ import (
 
 	"github.com/AKSHAT0604/geo-dispatch/internal/events"
 	"github.com/AKSHAT0604/geo-dispatch/internal/matching"
+	"github.com/AKSHAT0604/geo-dispatch/internal/metrics"
 	"github.com/AKSHAT0604/geo-dispatch/internal/statemachine"
 	"github.com/AKSHAT0604/geo-dispatch/internal/store"
 )
@@ -58,6 +59,8 @@ func NewDispatcher(offerStore *store.OfferStore, tripStore *store.TripStore, dri
 // by hanging. originCell is the trip's origin cell, carried on every
 // published event so consumers never need to recompute geography.
 func (d *Dispatcher) Run(ctx context.Context, tripID string, originCell h3.Cell, candidates []matching.RankedCandidate) (matched bool, driverID string, err error) {
+	start := time.Now()
+
 	trip, err := d.Trips.GetTrip(ctx, tripID)
 	if err != nil {
 		return false, "", fmt.Errorf("get trip: %w", err)
@@ -75,6 +78,7 @@ func (d *Dispatcher) Run(ctx context.Context, tripID string, originCell h3.Cell,
 				return false, "", err
 			}
 			d.publishTrip(ctx, tripID, originCell, statemachine.TripUnfulfilled, "")
+			d.recordOutcome(start, false, 0)
 			return false, "", nil
 		}
 		if err := d.Trips.SetTripState(ctx, tripID, statemachine.TripOffered); err != nil {
@@ -87,6 +91,7 @@ func (d *Dispatcher) Run(ctx context.Context, tripID string, originCell h3.Cell,
 				return false, "", err
 			}
 			d.publishTrip(ctx, tripID, originCell, statemachine.TripUnfulfilled, "")
+			d.recordOutcome(start, false, 0)
 			return false, "", nil
 		}
 	default:
@@ -99,7 +104,9 @@ func (d *Dispatcher) Run(ctx context.Context, tripID string, originCell h3.Cell,
 	}
 
 	backoff := d.Cfg.BaseBackoff
+	roundsAttempted := 0
 	for round := 1; round <= rounds; round++ {
+		roundsAttempted = round
 		candidate := candidates[round-1]
 		driverID := candidate.Driver.DriverID
 
@@ -126,6 +133,7 @@ func (d *Dispatcher) Run(ctx context.Context, tripID string, originCell h3.Cell,
 				return false, "", fmt.Errorf("mark trip matched: %w", err)
 			}
 			d.publishTrip(ctx, tripID, originCell, statemachine.TripMatched, driverID)
+			d.recordOutcome(start, true, roundsAttempted)
 			return true, driverID, nil
 
 		case Declined:
@@ -163,7 +171,21 @@ func (d *Dispatcher) Run(ctx context.Context, tripID string, originCell h3.Cell,
 		return false, "", err
 	}
 	d.publishTrip(ctx, tripID, originCell, statemachine.TripUnfulfilled, "")
+	d.recordOutcome(start, false, roundsAttempted)
 	return false, "", nil
+}
+
+// recordOutcome reports the three dispatch metrics that only make sense
+// for a valid, resolved outcome (matched or unfulfilled) - not for the
+// error returns elsewhere in Run, which aren't a dispatch result at all.
+func (d *Dispatcher) recordOutcome(start time.Time, matched bool, roundsAttempted int) {
+	metrics.MatchLatency.Observe(time.Since(start).Seconds())
+	metrics.OffersPerMatch.Observe(float64(roundsAttempted))
+	if matched {
+		metrics.MatchesTotal.Inc()
+	} else {
+		metrics.UnfulfilledTotal.Inc()
+	}
 }
 
 // publishTrip and publishOffer intentionally ignore publish errors beyond

@@ -7,6 +7,7 @@ import (
 	"github.com/uber/h3-go/v4"
 
 	"github.com/AKSHAT0604/geo-dispatch/internal/h3index"
+	"github.com/AKSHAT0604/geo-dispatch/internal/metrics"
 	"github.com/AKSHAT0604/geo-dispatch/internal/statemachine"
 	"github.com/AKSHAT0604/geo-dispatch/internal/store"
 )
@@ -38,8 +39,10 @@ var DefaultSearchConfig = SearchConfig{MinCandidates: 5, MaxK: 4}
 func FindCandidates(ctx context.Context, lookup DriverLookup, origin h3.Cell, cfg SearchConfig) ([]*store.DriverRecord, error) {
 	var candidates []*store.DriverRecord
 	scanned := make(map[h3.Cell]bool)
+	kReached := 0
 
 	for k := 0; k <= cfg.MaxK; k++ {
+		kReached = k
 		disk, err := h3index.KRing(origin, k)
 		if err != nil {
 			return nil, fmt.Errorf("k-ring at k=%d: %w", k, err)
@@ -74,5 +77,6 @@ func FindCandidates(ctx context.Context, lookup DriverLookup, origin h3.Cell, cf
 		}
 	}
 
+	metrics.RingExpansion.Observe(float64(kReached))
 	return candidates, nil
 }
