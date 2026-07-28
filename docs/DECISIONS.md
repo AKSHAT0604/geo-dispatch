@@ -45,11 +45,32 @@ wait time against driver earnings equity, not just minimize the former.
 
 ## 5. Why an offer state machine with timeouts rather than direct assignment?
 
-_To be answered once Phase 3 (offer lifecycle) is complete._
+Direct assignment assumes the top-ranked driver will always accept, which isn't true in
+practice: a driver's app can be backgrounded, their connection can drop, or they can
+simply decline. Without a timeout, a single unresponsive driver blocks the trip
+indefinitely - dispatch has no way to notice and move on. Modeling the offer as its own
+state machine (PENDING -> ACCEPTED | DECLINED | TIMED_OUT) makes "no response" a first-
+class outcome with a bounded wait (the offer window) rather than an unhandled case, and
+lets the dispatcher reoffer to the next-ranked candidate with backoff instead of
+retrying the same driver or giving up immediately. Exhausting the round cap marks the
+trip UNFULFILLED explicitly - failing to match is a valid, observable outcome, not a
+hang. The rejected alternative is offering the whole ranked list to every driver
+simultaneously and taking the first accept, which trades a clean explicit lifecycle for
+a race that's harder to reason about and wastes offers on drivers who were never going
+to be reached anyway.
 
 ## 6. Why idempotency keys on trip creation?
 
-_To be answered once Phase 3 (offer lifecycle) is complete._
+Mobile clients retry aggressively on flaky networks, and a request that appears to time
+out from the client's point of view may well have succeeded on the server - the retry
+is indistinguishable from a genuinely new request unless the client marks it. Without
+an idempotency key, that retry creates a second trip, and the rider ends up with two
+drivers converging on them. `CreateTrip` performs the existence check and the creation
+in a single Lua script specifically because a plain GET-then-SET has a race window: two
+copies of the same retry, arriving close together, can both pass the GET before either
+writes, producing exactly the duplicate the key was meant to prevent. The 24-hour TTL
+on the key is generous enough to outlive any realistic retry storm without holding the
+deduplication record forever.
 
 ## 7. Why is Redis the source of truth and node state only a cache?
 
