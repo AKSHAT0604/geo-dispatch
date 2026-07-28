@@ -16,11 +16,20 @@ type fakeHandler struct {
 	resp   *dispatchpb.DispatchResponse
 	err    error
 	called bool
+
+	offerResp   *dispatchpb.RespondToOfferResponse
+	offerErr    error
+	offerCalled bool
 }
 
 func (h *fakeHandler) Handle(ctx context.Context, req *dispatchpb.DispatchRequest) (*dispatchpb.DispatchResponse, error) {
 	h.called = true
 	return h.resp, h.err
+}
+
+func (h *fakeHandler) HandleOfferResponse(ctx context.Context, req *dispatchpb.RespondToOfferRequest) (*dispatchpb.RespondToOfferResponse, error) {
+	h.offerCalled = true
+	return h.offerResp, h.offerErr
 }
 
 func TestRouteHandlesLocallyWhenThisNodeOwnsCell(t *testing.T) {
@@ -49,6 +58,10 @@ type fakeRemoteServer struct {
 
 func (s *fakeRemoteServer) Dispatch(ctx context.Context, req *dispatchpb.DispatchRequest) (*dispatchpb.DispatchResponse, error) {
 	return s.resp, nil
+}
+
+func (s *fakeRemoteServer) RespondToOffer(ctx context.Context, req *dispatchpb.RespondToOfferRequest) (*dispatchpb.RespondToOfferResponse, error) {
+	return &dispatchpb.RespondToOfferResponse{Delivered: true}, nil
 }
 
 // TestRouteForwardsOverGRPCWhenAnotherNodeOwnsCell is the phase 5 routing
@@ -124,5 +137,69 @@ func TestRouteErrorsWhenRingIsEmpty(t *testing.T) {
 	r := New("node-a", ring, &fakeHandler{}, nil, nil)
 	if _, err := r.Route(context.Background(), "cell-1", &dispatchpb.DispatchRequest{}); err == nil {
 		t.Fatalf("Route with empty ring = nil error, want error")
+	}
+}
+
+func TestRouteOfferResponseHandlesLocallyWhenThisNodeOwnsCell(t *testing.T) {
+	ring := hashring.New(10)
+	ring.AddNode("node-a")
+
+	handler := &fakeHandler{offerResp: &dispatchpb.RespondToOfferResponse{Delivered: true}}
+	r := New("node-a", ring, handler, nil, nil)
+
+	resp, err := r.RouteOfferResponse(context.Background(), "cell-1", handler, &dispatchpb.RespondToOfferRequest{DriverId: "driver-1"})
+	if err != nil {
+		t.Fatalf("RouteOfferResponse: %v", err)
+	}
+	if !handler.offerCalled {
+		t.Fatalf("local offer handler was not called for a cell this node owns")
+	}
+	if !resp.Delivered {
+		t.Fatalf("resp.Delivered = false, want true")
+	}
+}
+
+func TestRouteOfferResponseForwardsOverGRPCWhenAnotherNodeOwnsCell(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	grpcServer := grpc.NewServer()
+	remote := &fakeRemoteServer{}
+	dispatchpb.RegisterDispatchServiceServer(grpcServer, remote)
+	go grpcServer.Serve(lis)
+	defer grpcServer.Stop()
+
+	ring := hashring.New(10)
+	ring.AddNode("node-a")
+	ring.AddNode("node-b")
+
+	owner, _ := ring.Lookup("cell-1")
+	localNode := "node-a"
+	if owner == "node-a" {
+		localNode = "node-b"
+	}
+
+	handler := &fakeHandler{} // must not be called
+	peerAddr := lis.Addr().String()
+	dial := func(addr string) (*grpc.ClientConn, error) {
+		return grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+	r := New(localNode, ring, handler, dial, func(nodeID string) (string, bool) {
+		if nodeID == owner {
+			return peerAddr, true
+		}
+		return "", false
+	})
+
+	resp, err := r.RouteOfferResponse(context.Background(), "cell-1", handler, &dispatchpb.RespondToOfferRequest{DriverId: "driver-1"})
+	if err != nil {
+		t.Fatalf("RouteOfferResponse: %v", err)
+	}
+	if handler.offerCalled {
+		t.Fatalf("local offer handler was called for a cell owned by a peer")
+	}
+	if !resp.Delivered {
+		t.Fatalf("resp.Delivered = false, want true (from the remote server)")
 	}
 }

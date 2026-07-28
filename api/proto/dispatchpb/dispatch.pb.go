@@ -21,6 +21,55 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type OfferResponse int32
+
+const (
+	OfferResponse_OFFER_RESPONSE_UNSPECIFIED OfferResponse = 0
+	OfferResponse_OFFER_RESPONSE_ACCEPTED    OfferResponse = 1
+	OfferResponse_OFFER_RESPONSE_DECLINED    OfferResponse = 2
+)
+
+// Enum value maps for OfferResponse.
+var (
+	OfferResponse_name = map[int32]string{
+		0: "OFFER_RESPONSE_UNSPECIFIED",
+		1: "OFFER_RESPONSE_ACCEPTED",
+		2: "OFFER_RESPONSE_DECLINED",
+	}
+	OfferResponse_value = map[string]int32{
+		"OFFER_RESPONSE_UNSPECIFIED": 0,
+		"OFFER_RESPONSE_ACCEPTED":    1,
+		"OFFER_RESPONSE_DECLINED":    2,
+	}
+)
+
+func (x OfferResponse) Enum() *OfferResponse {
+	p := new(OfferResponse)
+	*p = x
+	return p
+}
+
+func (x OfferResponse) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (OfferResponse) Descriptor() protoreflect.EnumDescriptor {
+	return file_dispatch_proto_enumTypes[0].Descriptor()
+}
+
+func (OfferResponse) Type() protoreflect.EnumType {
+	return &file_dispatch_proto_enumTypes[0]
+}
+
+func (x OfferResponse) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use OfferResponse.Descriptor instead.
+func (OfferResponse) EnumDescriptor() ([]byte, []int) {
+	return file_dispatch_proto_rawDescGZIP(), []int{0}
+}
+
 type DispatchRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	RiderId        string                 `protobuf:"bytes,1,opt,name=rider_id,json=riderId,proto3" json:"rider_id,omitempty"`
@@ -157,6 +206,105 @@ func (x *DispatchResponse) GetState() string {
 	return ""
 }
 
+type RespondToOfferRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	DriverId      string                 `protobuf:"bytes,1,opt,name=driver_id,json=driverId,proto3" json:"driver_id,omitempty"`
+	Response      OfferResponse          `protobuf:"varint,2,opt,name=response,proto3,enum=dispatch.v1.OfferResponse" json:"response,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RespondToOfferRequest) Reset() {
+	*x = RespondToOfferRequest{}
+	mi := &file_dispatch_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RespondToOfferRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RespondToOfferRequest) ProtoMessage() {}
+
+func (x *RespondToOfferRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_dispatch_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RespondToOfferRequest.ProtoReflect.Descriptor instead.
+func (*RespondToOfferRequest) Descriptor() ([]byte, []int) {
+	return file_dispatch_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *RespondToOfferRequest) GetDriverId() string {
+	if x != nil {
+		return x.DriverId
+	}
+	return ""
+}
+
+func (x *RespondToOfferRequest) GetResponse() OfferResponse {
+	if x != nil {
+		return x.Response
+	}
+	return OfferResponse_OFFER_RESPONSE_UNSPECIFIED
+}
+
+type RespondToOfferResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// delivered is false if there was no open offer for this driver to
+	// respond to - it already timed out, or the driver ID is unknown - which
+	// callers should treat as a stale response, not an error.
+	Delivered     bool `protobuf:"varint,1,opt,name=delivered,proto3" json:"delivered,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RespondToOfferResponse) Reset() {
+	*x = RespondToOfferResponse{}
+	mi := &file_dispatch_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RespondToOfferResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RespondToOfferResponse) ProtoMessage() {}
+
+func (x *RespondToOfferResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_dispatch_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RespondToOfferResponse.ProtoReflect.Descriptor instead.
+func (*RespondToOfferResponse) Descriptor() ([]byte, []int) {
+	return file_dispatch_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *RespondToOfferResponse) GetDelivered() bool {
+	if x != nil {
+		return x.Delivered
+	}
+	return false
+}
+
 var File_dispatch_proto protoreflect.FileDescriptor
 
 const file_dispatch_proto_rawDesc = "" +
@@ -173,9 +321,19 @@ const file_dispatch_proto_rawDesc = "" +
 	"\atrip_id\x18\x01 \x01(\tR\x06tripId\x12\x18\n" +
 	"\amatched\x18\x02 \x01(\bR\amatched\x12\x1b\n" +
 	"\tdriver_id\x18\x03 \x01(\tR\bdriverId\x12\x14\n" +
-	"\x05state\x18\x04 \x01(\tR\x05state2Z\n" +
+	"\x05state\x18\x04 \x01(\tR\x05state\"l\n" +
+	"\x15RespondToOfferRequest\x12\x1b\n" +
+	"\tdriver_id\x18\x01 \x01(\tR\bdriverId\x126\n" +
+	"\bresponse\x18\x02 \x01(\x0e2\x1a.dispatch.v1.OfferResponseR\bresponse\"6\n" +
+	"\x16RespondToOfferResponse\x12\x1c\n" +
+	"\tdelivered\x18\x01 \x01(\bR\tdelivered*i\n" +
+	"\rOfferResponse\x12\x1e\n" +
+	"\x1aOFFER_RESPONSE_UNSPECIFIED\x10\x00\x12\x1b\n" +
+	"\x17OFFER_RESPONSE_ACCEPTED\x10\x01\x12\x1b\n" +
+	"\x17OFFER_RESPONSE_DECLINED\x10\x022\xb5\x01\n" +
 	"\x0fDispatchService\x12G\n" +
-	"\bDispatch\x12\x1c.dispatch.v1.DispatchRequest\x1a\x1d.dispatch.v1.DispatchResponseB9Z7github.com/AKSHAT0604/geo-dispatch/api/proto/dispatchpbb\x06proto3"
+	"\bDispatch\x12\x1c.dispatch.v1.DispatchRequest\x1a\x1d.dispatch.v1.DispatchResponse\x12Y\n" +
+	"\x0eRespondToOffer\x12\".dispatch.v1.RespondToOfferRequest\x1a#.dispatch.v1.RespondToOfferResponseB9Z7github.com/AKSHAT0604/geo-dispatch/api/proto/dispatchpbb\x06proto3"
 
 var (
 	file_dispatch_proto_rawDescOnce sync.Once
@@ -189,19 +347,26 @@ func file_dispatch_proto_rawDescGZIP() []byte {
 	return file_dispatch_proto_rawDescData
 }
 
-var file_dispatch_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_dispatch_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_dispatch_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_dispatch_proto_goTypes = []any{
-	(*DispatchRequest)(nil),  // 0: dispatch.v1.DispatchRequest
-	(*DispatchResponse)(nil), // 1: dispatch.v1.DispatchResponse
+	(OfferResponse)(0),             // 0: dispatch.v1.OfferResponse
+	(*DispatchRequest)(nil),        // 1: dispatch.v1.DispatchRequest
+	(*DispatchResponse)(nil),       // 2: dispatch.v1.DispatchResponse
+	(*RespondToOfferRequest)(nil),  // 3: dispatch.v1.RespondToOfferRequest
+	(*RespondToOfferResponse)(nil), // 4: dispatch.v1.RespondToOfferResponse
 }
 var file_dispatch_proto_depIdxs = []int32{
-	0, // 0: dispatch.v1.DispatchService.Dispatch:input_type -> dispatch.v1.DispatchRequest
-	1, // 1: dispatch.v1.DispatchService.Dispatch:output_type -> dispatch.v1.DispatchResponse
-	1, // [1:2] is the sub-list for method output_type
-	0, // [0:1] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0, // 0: dispatch.v1.RespondToOfferRequest.response:type_name -> dispatch.v1.OfferResponse
+	1, // 1: dispatch.v1.DispatchService.Dispatch:input_type -> dispatch.v1.DispatchRequest
+	3, // 2: dispatch.v1.DispatchService.RespondToOffer:input_type -> dispatch.v1.RespondToOfferRequest
+	2, // 3: dispatch.v1.DispatchService.Dispatch:output_type -> dispatch.v1.DispatchResponse
+	4, // 4: dispatch.v1.DispatchService.RespondToOffer:output_type -> dispatch.v1.RespondToOfferResponse
+	3, // [3:5] is the sub-list for method output_type
+	1, // [1:3] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_dispatch_proto_init() }
@@ -214,13 +379,14 @@ func file_dispatch_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dispatch_proto_rawDesc), len(file_dispatch_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   2,
+			NumEnums:      1,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_dispatch_proto_goTypes,
 		DependencyIndexes: file_dispatch_proto_depIdxs,
+		EnumInfos:         file_dispatch_proto_enumTypes,
 		MessageInfos:      file_dispatch_proto_msgTypes,
 	}.Build()
 	File_dispatch_proto = out.File

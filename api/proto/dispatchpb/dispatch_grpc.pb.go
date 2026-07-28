@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	DispatchService_Dispatch_FullMethodName = "/dispatch.v1.DispatchService/Dispatch"
+	DispatchService_Dispatch_FullMethodName       = "/dispatch.v1.DispatchService/Dispatch"
+	DispatchService_RespondToOffer_FullMethodName = "/dispatch.v1.DispatchService/RespondToOffer"
 )
 
 // DispatchServiceClient is the client API for DispatchService service.
@@ -33,6 +34,13 @@ type DispatchServiceClient interface {
 	// Dispatch runs the full match-and-offer pipeline for a ride request
 	// whose origin cell this node owns.
 	Dispatch(ctx context.Context, in *DispatchRequest, opts ...grpc.CallOption) (*DispatchResponse, error)
+	// RespondToOffer delivers a driver's accept/decline for whatever trip is
+	// currently offered to them. A driver's client only ever knows its own
+	// driver ID, not which node is running that trip's dispatch loop or even
+	// the trip ID itself - the receiving node looks both up via Redis
+	// (OfferStore.CurrentOfferFor) and forwards to the owning node exactly
+	// like Dispatch does, so a driver can call any node.
+	RespondToOffer(ctx context.Context, in *RespondToOfferRequest, opts ...grpc.CallOption) (*RespondToOfferResponse, error)
 }
 
 type dispatchServiceClient struct {
@@ -53,6 +61,16 @@ func (c *dispatchServiceClient) Dispatch(ctx context.Context, in *DispatchReques
 	return out, nil
 }
 
+func (c *dispatchServiceClient) RespondToOffer(ctx context.Context, in *RespondToOfferRequest, opts ...grpc.CallOption) (*RespondToOfferResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RespondToOfferResponse)
+	err := c.cc.Invoke(ctx, DispatchService_RespondToOffer_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DispatchServiceServer is the server API for DispatchService service.
 // All implementations must embed UnimplementedDispatchServiceServer
 // for forward compatibility.
@@ -64,6 +82,13 @@ type DispatchServiceServer interface {
 	// Dispatch runs the full match-and-offer pipeline for a ride request
 	// whose origin cell this node owns.
 	Dispatch(context.Context, *DispatchRequest) (*DispatchResponse, error)
+	// RespondToOffer delivers a driver's accept/decline for whatever trip is
+	// currently offered to them. A driver's client only ever knows its own
+	// driver ID, not which node is running that trip's dispatch loop or even
+	// the trip ID itself - the receiving node looks both up via Redis
+	// (OfferStore.CurrentOfferFor) and forwards to the owning node exactly
+	// like Dispatch does, so a driver can call any node.
+	RespondToOffer(context.Context, *RespondToOfferRequest) (*RespondToOfferResponse, error)
 	mustEmbedUnimplementedDispatchServiceServer()
 }
 
@@ -76,6 +101,9 @@ type UnimplementedDispatchServiceServer struct{}
 
 func (UnimplementedDispatchServiceServer) Dispatch(context.Context, *DispatchRequest) (*DispatchResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Dispatch not implemented")
+}
+func (UnimplementedDispatchServiceServer) RespondToOffer(context.Context, *RespondToOfferRequest) (*RespondToOfferResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RespondToOffer not implemented")
 }
 func (UnimplementedDispatchServiceServer) mustEmbedUnimplementedDispatchServiceServer() {}
 func (UnimplementedDispatchServiceServer) testEmbeddedByValue()                         {}
@@ -116,6 +144,24 @@ func _DispatchService_Dispatch_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _DispatchService_RespondToOffer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RespondToOfferRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DispatchServiceServer).RespondToOffer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DispatchService_RespondToOffer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DispatchServiceServer).RespondToOffer(ctx, req.(*RespondToOfferRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // DispatchService_ServiceDesc is the grpc.ServiceDesc for DispatchService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -126,6 +172,10 @@ var DispatchService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Dispatch",
 			Handler:    _DispatchService_Dispatch_Handler,
+		},
+		{
+			MethodName: "RespondToOffer",
+			Handler:    _DispatchService_RespondToOffer_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -11,6 +11,14 @@ service DispatchService {
   // Dispatch runs the full match-and-offer pipeline for a ride request
   // whose origin cell this node owns.
   rpc Dispatch(DispatchRequest) returns (DispatchResponse);
+
+  // RespondToOffer delivers a driver's accept/decline for whatever trip is
+  // currently offered to them. A driver's client only ever knows its own
+  // driver ID, not which node is running that trip's dispatch loop or even
+  // the trip ID itself - the receiving node looks both up via Redis
+  // (OfferStore.CurrentOfferFor) and forwards to the owning node exactly
+  // like Dispatch does, so a driver can call any node.
+  rpc RespondToOffer(RespondToOfferRequest) returns (RespondToOfferResponse);
 }
 
 message DispatchRequest {
@@ -25,4 +33,22 @@ message DispatchResponse {
   bool matched = 2;
   string driver_id = 3;
   string state = 4;
+}
+
+enum OfferResponse {
+  OFFER_RESPONSE_UNSPECIFIED = 0;
+  OFFER_RESPONSE_ACCEPTED = 1;
+  OFFER_RESPONSE_DECLINED = 2;
+}
+
+message RespondToOfferRequest {
+  string driver_id = 1;
+  OfferResponse response = 2;
+}
+
+message RespondToOfferResponse {
+  // delivered is false if there was no open offer for this driver to
+  // respond to - it already timed out, or the driver ID is unknown - which
+  // callers should treat as a stale response, not an error.
+  bool delivered = 1;
 }
