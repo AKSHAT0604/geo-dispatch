@@ -19,11 +19,34 @@ is a quadtree/geohash grid keyed by string prefix.
 
 ## 2. Why shard by cell ID rather than by driver ID or trip ID?
 
-_To be answered once Phase 5 (sharding) is complete._
+Matching is fundamentally a geographic query: find AVAILABLE drivers near a request's
+origin. Sharding by cell ID means every driver a request could possibly match against
+lives on the same node (or a small, deterministic set of neighbouring-cell nodes for
+k-ring expansion near a shard boundary), so a single match can usually be answered
+without a single cross-node call. Sharding by driver ID or trip ID instead would
+scatter a request's candidate pool across every node in the cluster essentially at
+random - every match would become a scatter-gather query, trading a fast local Redis
+read for a fan-out RPC to every shard, for no benefit, since driver ID and trip ID carry
+no relationship to what a request actually needs to search over.
 
 ## 3. Why consistent hashing rather than modulo hashing?
 
-_To be answered once Phase 5 (hash ring) is complete._
+Modulo hashing (`node = hash(key) % N`) ties every key's owner to the current node
+count: adding or removing a single node changes `N` and reshuffles the owner of nearly
+every key, which for this system means nearly every H3 cell changes hands at once on
+any scaling event or node failure - exactly the "kill one mid-load" scenario Phase 5's
+definition of done stresses. Consistent hashing fixes node positions on a ring
+independent of `N`; adding the Nth node only takes over the keys nearest its new
+position on the ring, relocating roughly `1/N` of keys rather than nearly all of them
+(`internal/hashring`'s test asserts this directly). Virtual nodes (150 replicas per
+physical node here) exist because a single hash per physical node means that node's
+share of the ring depends entirely on where that one hash landed - one node could end
+up owning 5% of the ring and another 40% by chance. Many replicas per node average that
+out to a roughly even split regardless of which physical node they belong to.
+
+This is also the same property the author's Distributed File System project shards on,
+which is deliberate: it is the concept this project is built to demonstrate a second,
+independent application of.
 
 ## 4. Why rank by travel time rather than straight-line distance?
 
@@ -74,4 +97,24 @@ deduplication record forever.
 
 ## 7. Why is Redis the source of truth and node state only a cache?
 
-_To be answered once Phase 5 (sharding) is complete._
+Ownership of an H3 cell moves between nodes whenever the ring changes - a node joins,
+leaves, or crashes - and whichever node owns a cell next must be able to serve correct
+matches for it immediately, without a warm-up period where it doesn't yet know which
+drivers are there. That's only possible if the data those decisions are based on
+doesn't live solely in the memory of whichever node happened to own the cell before.
+In this system every read - driver location, driver state, trip state, offer state -
+already goes straight to Redis on every call; there is no per-node cache to invalidate
+or rebuild in the first place, which is a stronger version of the same principle: if
+node-local state doesn't exist, there's nothing for a handoff to get out of sync.
+
+The one piece of real in-memory state is the goroutine actually running a trip's
+reoffer loop and the channel it's waiting on for a driver's response - and that's
+exactly what's lost if its node crashes. `Reconciler` (`internal/offers/reconcile.go`)
+is what makes that recoverable: it finds trips left in Redis's `OFFERED` state with no
+live offer and resumes them with a fresh match, so whichever node ends up owning that
+cell rebuilds everything it needs from Redis rather than from anything the old owner
+held locally. The rejected alternative - each node maintaining its own in-memory view
+of the drivers and trips in the cells it owns - would need an explicit rebuild step on
+every handoff and a way to detect staleness in the meantime; reading from Redis on
+every call sidesteps both problems at the cost of a network round trip Redis is fast
+enough to absorb.
