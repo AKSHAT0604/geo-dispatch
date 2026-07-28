@@ -13,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/uber/h3-go/v4"
 
+	"github.com/AKSHAT0604/geo-dispatch/internal/events"
 	"github.com/AKSHAT0604/geo-dispatch/internal/h3index"
 	"github.com/AKSHAT0604/geo-dispatch/internal/statemachine"
 )
@@ -39,14 +40,25 @@ type DriverRecord struct {
 // DriverStore persists driver location and state in Redis, keeping each
 // driver indexed under exactly one H3 cell set at all times.
 type DriverStore struct {
-	rdb *redis.Client
-	res int
+	rdb       *redis.Client
+	res       int
+	publisher events.Publisher
 }
 
 // NewDriverStore returns a DriverStore that indexes drivers at the given H3
-// resolution.
+// resolution. Events are discarded until SetPublisher is called.
 func NewDriverStore(rdb *redis.Client, resolution int) *DriverStore {
-	return &DriverStore{rdb: rdb, res: resolution}
+	return &DriverStore{rdb: rdb, res: resolution, publisher: events.NoopPublisher{}}
+}
+
+// SetPublisher wires up publishing of driver.location events on every
+// UpdateLocation call. Kept separate from the constructor so existing
+// callers (including every test) are unaffected by adding it.
+func (s *DriverStore) SetPublisher(p events.Publisher) {
+	if p == nil {
+		p = events.NoopPublisher{}
+	}
+	s.publisher = p
 }
 
 func driverKey(driverID string) string { return "driver:" + driverID }
@@ -113,6 +125,15 @@ func (s *DriverStore) UpdateLocation(ctx context.Context, driverID string, lat, 
 			return fmt.Errorf("set available_since: %w", err)
 		}
 	}
+
+	_ = s.publisher.PublishDriverLocation(ctx, events.DriverLocationEvent{
+		DriverID:  driverID,
+		Lat:       lat,
+		Lng:       lng,
+		Cell:      cell.String(),
+		State:     string(state),
+		Timestamp: time.Now(),
+	})
 	return nil
 }
 

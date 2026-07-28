@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/uber/h3-go/v4"
+
+	"github.com/AKSHAT0604/geo-dispatch/internal/events"
 	"github.com/AKSHAT0604/geo-dispatch/internal/matching"
 	"github.com/AKSHAT0604/geo-dispatch/internal/statemachine"
 	"github.com/AKSHAT0604/geo-dispatch/internal/store"
@@ -30,16 +33,21 @@ var DefaultConfig = Config{
 // Dispatcher runs the offer/reoffer loop for a trip against a pre-ranked
 // list of candidates.
 type Dispatcher struct {
-	Offers  *store.OfferStore
-	Trips   *store.TripStore
-	Drivers *store.DriverStore
-	Hub     *ResponseHub
-	Cfg     Config
+	Offers    *store.OfferStore
+	Trips     *store.TripStore
+	Drivers   *store.DriverStore
+	Hub       *ResponseHub
+	Publisher events.Publisher
+	Cfg       Config
 }
 
-// NewDispatcher returns a Dispatcher.
-func NewDispatcher(offerStore *store.OfferStore, tripStore *store.TripStore, driverStore *store.DriverStore, hub *ResponseHub, cfg Config) *Dispatcher {
-	return &Dispatcher{Offers: offerStore, Trips: tripStore, Drivers: driverStore, Hub: hub, Cfg: cfg}
+// NewDispatcher returns a Dispatcher. publisher may be nil, in which case
+// events are discarded (events.NoopPublisher).
+func NewDispatcher(offerStore *store.OfferStore, tripStore *store.TripStore, driverStore *store.DriverStore, hub *ResponseHub, publisher events.Publisher, cfg Config) *Dispatcher {
+	if publisher == nil {
+		publisher = events.NoopPublisher{}
+	}
+	return &Dispatcher{Offers: offerStore, Trips: tripStore, Drivers: driverStore, Hub: hub, Publisher: publisher, Cfg: cfg}
 }
 
 // Run offers tripID to each ranked candidate in turn, waiting up to
@@ -47,15 +55,21 @@ func NewDispatcher(offerStore *store.OfferStore, tripStore *store.TripStore, dri
 // the first acceptance, or after Cfg.MaxRounds offers with none accepted -
 // whichever comes first - and marks the trip UNFULFILLED in that case.
 // Failing to match is a valid outcome that must be handled explicitly, not
-// by hanging.
-func (d *Dispatcher) Run(ctx context.Context, tripID string, candidates []matching.RankedCandidate) (matched bool, driverID string, err error) {
+// by hanging. originCell is the trip's origin cell, carried on every
+// published event so consumers never need to recompute geography.
+func (d *Dispatcher) Run(ctx context.Context, tripID string, originCell h3.Cell, candidates []matching.RankedCandidate) (matched bool, driverID string, err error) {
 	if len(candidates) == 0 {
-		return false, "", d.Trips.MarkUnfulfilled(ctx, tripID)
+		if err := d.Trips.MarkUnfulfilled(ctx, tripID); err != nil {
+			return false, "", err
+		}
+		d.publishTrip(ctx, tripID, originCell, statemachine.TripUnfulfilled, "")
+		return false, "", nil
 	}
 
 	if err := d.Trips.SetTripState(ctx, tripID, statemachine.TripOffered); err != nil {
 		return false, "", fmt.Errorf("mark trip offered: %w", err)
 	}
+	d.publishTrip(ctx, tripID, originCell, statemachine.TripOffered, "")
 
 	rounds := d.Cfg.MaxRounds
 	if rounds > len(candidates) {
@@ -73,6 +87,7 @@ func (d *Dispatcher) Run(ctx context.Context, tripID string, candidates []matchi
 		if err := d.Offers.CreateOffer(ctx, tripID, driverID, round, d.Cfg.OfferWindow); err != nil {
 			return false, "", fmt.Errorf("create offer round %d: %w", round, err)
 		}
+		d.publishOffer(ctx, tripID, driverID, round, originCell, statemachine.OfferPending)
 
 		resp := d.awaitResponse(ctx, tripID)
 
@@ -81,22 +96,26 @@ func (d *Dispatcher) Run(ctx context.Context, tripID string, candidates []matchi
 			if err := d.Offers.SetOfferState(ctx, tripID, driverID, statemachine.OfferAccepted); err != nil {
 				return false, "", fmt.Errorf("accept offer: %w", err)
 			}
+			d.publishOffer(ctx, tripID, driverID, round, originCell, statemachine.OfferAccepted)
 			if err := d.Drivers.SetState(ctx, driverID, statemachine.DriverEnRoute); err != nil {
 				return false, "", fmt.Errorf("move driver %s en route: %w", driverID, err)
 			}
 			if err := d.Trips.MarkMatched(ctx, tripID, driverID); err != nil {
 				return false, "", fmt.Errorf("mark trip matched: %w", err)
 			}
+			d.publishTrip(ctx, tripID, originCell, statemachine.TripMatched, driverID)
 			return true, driverID, nil
 
 		case Declined:
 			if err := d.Offers.SetOfferState(ctx, tripID, driverID, statemachine.OfferDeclined); err != nil {
 				return false, "", fmt.Errorf("decline offer: %w", err)
 			}
+			d.publishOffer(ctx, tripID, driverID, round, originCell, statemachine.OfferDeclined)
 		default: // NoResponse: the offer window elapsed.
 			if err := d.Offers.SetOfferState(ctx, tripID, driverID, statemachine.OfferTimedOut); err != nil {
 				return false, "", fmt.Errorf("time out offer: %w", err)
 			}
+			d.publishOffer(ctx, tripID, driverID, round, originCell, statemachine.OfferTimedOut)
 		}
 
 		// Declined or timed out: release the driver back to the pool. It
@@ -118,7 +137,38 @@ func (d *Dispatcher) Run(ctx context.Context, tripID string, candidates []matchi
 		}
 	}
 
-	return false, "", d.Trips.MarkUnfulfilled(ctx, tripID)
+	if err := d.Trips.MarkUnfulfilled(ctx, tripID); err != nil {
+		return false, "", err
+	}
+	d.publishTrip(ctx, tripID, originCell, statemachine.TripUnfulfilled, "")
+	return false, "", nil
+}
+
+// publishTrip and publishOffer intentionally ignore publish errors beyond
+// logging-worthy failure: losing an analytics event must never fail or
+// stall the dispatch loop that produced it. A production build would
+// route this through metrics/logging rather than dropping it silently;
+// that wiring lives with the services in later phases, not in this
+// package's core loop.
+func (d *Dispatcher) publishTrip(ctx context.Context, tripID string, cell h3.Cell, state statemachine.TripState, driverID string) {
+	_ = d.Publisher.PublishTripLifecycle(ctx, events.TripLifecycleEvent{
+		TripID:    tripID,
+		State:     string(state),
+		Cell:      cell.String(),
+		DriverID:  driverID,
+		Timestamp: time.Now(),
+	})
+}
+
+func (d *Dispatcher) publishOffer(ctx context.Context, tripID, driverID string, round int, cell h3.Cell, state statemachine.OfferState) {
+	_ = d.Publisher.PublishOffer(ctx, events.OfferEvent{
+		TripID:    tripID,
+		DriverID:  driverID,
+		Round:     round,
+		State:     string(state),
+		Cell:      cell.String(),
+		Timestamp: time.Now(),
+	})
 }
 
 // awaitResponse blocks until a driver responds to tripID's open offer or

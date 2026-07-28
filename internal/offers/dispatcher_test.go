@@ -2,18 +2,58 @@ package offers
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+	"github.com/uber/h3-go/v4"
 
+	"github.com/AKSHAT0604/geo-dispatch/internal/events"
+	"github.com/AKSHAT0604/geo-dispatch/internal/h3index"
 	"github.com/AKSHAT0604/geo-dispatch/internal/matching"
 	"github.com/AKSHAT0604/geo-dispatch/internal/statemachine"
 	"github.com/AKSHAT0604/geo-dispatch/internal/store"
 )
 
-func newTestDispatcher(t *testing.T, cfg Config) (*Dispatcher, *store.DriverStore, *store.TripStore) {
+var testOriginCell = mustCell(17.3850, 78.4867)
+
+func mustCell(lat, lng float64) h3.Cell {
+	c, err := h3index.CellFor(lat, lng, h3index.DefaultResolution)
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
+
+// recordingPublisher captures every published event for assertions,
+// instead of talking to a real broker.
+type recordingPublisher struct {
+	mu     sync.Mutex
+	trips  []events.TripLifecycleEvent
+	offers []events.OfferEvent
+}
+
+func (p *recordingPublisher) PublishDriverLocation(context.Context, events.DriverLocationEvent) error {
+	return nil
+}
+
+func (p *recordingPublisher) PublishTripLifecycle(_ context.Context, e events.TripLifecycleEvent) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.trips = append(p.trips, e)
+	return nil
+}
+
+func (p *recordingPublisher) PublishOffer(_ context.Context, e events.OfferEvent) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.offers = append(p.offers, e)
+	return nil
+}
+
+func newTestDispatcher(t *testing.T, cfg Config, publisher events.Publisher) (*Dispatcher, *store.DriverStore, *store.TripStore) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
@@ -23,7 +63,7 @@ func newTestDispatcher(t *testing.T, cfg Config) (*Dispatcher, *store.DriverStor
 	offerStore := store.NewOfferStore(rdb)
 	hub := NewResponseHub()
 
-	return NewDispatcher(offerStore, trips, drivers, hub, cfg), drivers, trips
+	return NewDispatcher(offerStore, trips, drivers, hub, publisher, cfg), drivers, trips
 }
 
 // fastConfig keeps offer windows above 1s: go-redis floors EXPIRE
@@ -42,7 +82,8 @@ var fastConfig = Config{
 // driver, and asserts idempotent trip creation alongside it as part of the
 // same end-to-end request lifecycle.
 func TestDispatcherReoffersToSecondRankedDriverOnTimeout(t *testing.T) {
-	dispatcher, drivers, trips := newTestDispatcher(t, fastConfig)
+	publisher := &recordingPublisher{}
+	dispatcher, drivers, trips := newTestDispatcher(t, fastConfig, publisher)
 	ctx := context.Background()
 
 	if err := drivers.UpdateLocation(ctx, "driver-1", 17.3850, 78.4867); err != nil {
@@ -75,7 +116,7 @@ func TestDispatcherReoffersToSecondRankedDriverOnTimeout(t *testing.T) {
 	// first candidate's offer window elapsed.
 	go acceptWhenOffered(t, dispatcher, trip.TripID, "driver-2")
 
-	matched, driverID, err := dispatcher.Run(ctx, trip.TripID, candidates)
+	matched, driverID, err := dispatcher.Run(ctx, trip.TripID, testOriginCell, candidates)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -106,10 +147,45 @@ func TestDispatcherReoffersToSecondRankedDriverOnTimeout(t *testing.T) {
 	if finalTrip.State != statemachine.TripMatched || finalTrip.MatchedDriverID != "driver-2" {
 		t.Fatalf("trip = %+v, want MATCHED with driver-2", finalTrip)
 	}
+
+	publisher.mu.Lock()
+	tripStates := make([]string, len(publisher.trips))
+	for i, e := range publisher.trips {
+		tripStates[i] = e.State
+	}
+	offerStates := make([]string, len(publisher.offers))
+	for i, e := range publisher.offers {
+		offerStates[i] = e.DriverID + ":" + e.State
+	}
+	publisher.mu.Unlock()
+
+	wantTripStates := []string{"OFFERED", "MATCHED"}
+	if !equalIDs(tripStates, wantTripStates) {
+		t.Fatalf("published trip states = %v, want %v", tripStates, wantTripStates)
+	}
+	wantOfferStates := []string{
+		"driver-1:PENDING", "driver-1:TIMED_OUT",
+		"driver-2:PENDING", "driver-2:ACCEPTED",
+	}
+	if !equalIDs(offerStates, wantOfferStates) {
+		t.Fatalf("published offer states = %v, want %v", offerStates, wantOfferStates)
+	}
+}
+
+func equalIDs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestDispatcherMarksTripUnfulfilledWhenEveryCandidateTimesOut(t *testing.T) {
-	dispatcher, drivers, trips := newTestDispatcher(t, fastConfig)
+	dispatcher, drivers, trips := newTestDispatcher(t, fastConfig, nil)
 	ctx := context.Background()
 
 	for _, id := range []string{"driver-1", "driver-2"} {
@@ -128,7 +204,7 @@ func TestDispatcherMarksTripUnfulfilledWhenEveryCandidateTimesOut(t *testing.T) 
 		{Driver: &store.DriverRecord{DriverID: "driver-2"}},
 	}
 
-	matched, driverID, err := dispatcher.Run(ctx, trip.TripID, candidates)
+	matched, driverID, err := dispatcher.Run(ctx, trip.TripID, testOriginCell, candidates)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -156,7 +232,7 @@ func TestDispatcherMarksTripUnfulfilledWhenEveryCandidateTimesOut(t *testing.T) 
 }
 
 func TestDispatcherMarksTripUnfulfilledWithNoCandidates(t *testing.T) {
-	dispatcher, _, trips := newTestDispatcher(t, fastConfig)
+	dispatcher, _, trips := newTestDispatcher(t, fastConfig, nil)
 	ctx := context.Background()
 
 	trip, err := trips.CreateTrip(ctx, "rider-1", 17.3850, 78.4867, "idem-key-3")
@@ -164,7 +240,7 @@ func TestDispatcherMarksTripUnfulfilledWithNoCandidates(t *testing.T) {
 		t.Fatalf("CreateTrip: %v", err)
 	}
 
-	matched, _, err := dispatcher.Run(ctx, trip.TripID, nil)
+	matched, _, err := dispatcher.Run(ctx, trip.TripID, testOriginCell, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
