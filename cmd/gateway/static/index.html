@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>geo-dispatch live map</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  html, body { height: 100%; margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
+  #map { position: absolute; inset: 0; }
+  #panel {
+    position: absolute; top: 12px; right: 12px; z-index: 1000;
+    background: rgba(20, 20, 24, 0.85); color: #eee; padding: 12px 16px;
+    border-radius: 8px; font-size: 13px; min-width: 220px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+  }
+  #panel h1 { font-size: 14px; margin: 0 0 8px; font-weight: 600; }
+  #panel .row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+  #panel .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  #status { margin-top: 8px; font-size: 11px; opacity: 0.7; }
+  #log {
+    position: absolute; bottom: 12px; left: 12px; z-index: 1000;
+    background: rgba(20, 20, 24, 0.85); color: #ccc; padding: 8px 12px;
+    border-radius: 8px; font-size: 11px; font-family: ui-monospace, Consolas, monospace;
+    max-height: 160px; width: 420px; overflow-y: auto;
+  }
+  #log div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+  <h1>geo-dispatch</h1>
+  <div class="row"><span><span class="dot" style="background:#3388ff"></span>REQUESTED</span><span id="count-requested">0</span></div>
+  <div class="row"><span><span class="dot" style="background:#ff9800"></span>OFFERED</span><span id="count-offered">0</span></div>
+  <div class="row"><span><span class="dot" style="background:#2ecc71"></span>MATCHED</span><span id="count-matched">0</span></div>
+  <div class="row"><span><span class="dot" style="background:#e74c3c"></span>UNFULFILLED</span><span id="count-unfulfilled">0</span></div>
+  <div id="status">connecting...</div>
+</div>
+<div id="log"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
+<script>
+// Hyderabad, matching cmd/loadgen's bounding box.
+const map = L.map('map').setView([17.385, 78.4867], 12);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors',
+  maxZoom: 18,
+}).addTo(map);
+
+const COLORS = {
+  REQUESTED: '#3388ff',
+  OFFERED: '#ff9800',
+  MATCHED: '#2ecc71',
+  UNFULFILLED: '#e74c3c',
+};
+
+const counts = { REQUESTED: 0, OFFERED: 0, MATCHED: 0, UNFULFILLED: 0 };
+const hexLayers = new Map(); // tripID -> current L.polygon for that trip's cell
+
+function updateCounts() {
+  document.getElementById('count-requested').textContent = counts.REQUESTED;
+  document.getElementById('count-offered').textContent = counts.OFFERED;
+  document.getElementById('count-matched').textContent = counts.MATCHED;
+  document.getElementById('count-unfulfilled').textContent = counts.UNFULFILLED;
+}
+
+function logLine(text) {
+  const log = document.getElementById('log');
+  const line = document.createElement('div');
+  line.textContent = text;
+  log.prepend(line);
+  while (log.childNodes.length > 30) log.removeChild(log.lastChild);
+}
+
+function drawCell(tripID, cell, state) {
+  const existing = hexLayers.get(tripID);
+  if (existing) map.removeLayer(existing);
+
+  if (state === 'MATCHED' || state === 'UNFULFILLED') {
+    // Terminal states fade out after a moment rather than accumulating
+    // forever on the map.
+    setTimeout(() => {
+      const layer = hexLayers.get(tripID);
+      if (layer) { map.removeLayer(layer); hexLayers.delete(tripID); }
+    }, 4000);
+  }
+
+  try {
+    const boundary = h3.cellToBoundary(cell); // [[lat, lng], ...]
+    const polygon = L.polygon(boundary, {
+      color: COLORS[state] || '#888',
+      weight: 2,
+      fillOpacity: 0.25,
+    }).addTo(map);
+    polygon.bindTooltip(`${state}<br>${tripID.slice(0, 8)}`, { sticky: true });
+    hexLayers.set(tripID, polygon);
+  } catch (e) {
+    console.warn('failed to render cell', cell, e);
+  }
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => { document.getElementById('status').textContent = 'connected'; };
+  ws.onclose = () => {
+    document.getElementById('status').textContent = 'disconnected, retrying...';
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = (msg) => {
+    let event;
+    try { event = JSON.parse(msg.data); } catch { return; }
+    if (!event.state || !event.cell) return;
+
+    if (counts[event.state] !== undefined) counts[event.state]++;
+    updateCounts();
+    logLine(`${new Date().toLocaleTimeString()}  ${event.state.padEnd(11)} trip=${(event.trip_id || '').slice(0, 8)} driver=${(event.driver_id || '-').slice(0, 8)}`);
+    drawCell(event.trip_id, event.cell, event.state);
+  };
+}
+connect();
+</script>
+</body>
+</html>

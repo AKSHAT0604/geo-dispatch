@@ -1,6 +1,6 @@
 MODULE  := github.com/AKSHAT0604/geo-dispatch
 BIN_DIR := bin
-SERVICES := supply demand disco surge loadgen
+SERVICES := supply demand disco surge loadgen gateway
 
 .PHONY: proto build test up down bench clean
 
