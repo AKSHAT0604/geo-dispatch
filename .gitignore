@@ -1,0 +1,27 @@
+bin/
+*.exe
+*.exe~
+*.test
+*.out
+*.prof
+
+# Go build/test cache artifacts if ever written locally
+/vendor/
+
+# Environment / local overrides
+.env
+.env.*
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Claude Code local tooling (not part of the shipped project)
+.claude/
+
+# Local planning doc, not part of the shipped project
+Project1_Geospatial_Dispatch_Engine.md
+
+# OS cruft
+.DS_Store
+Thumbs.db
