@@ -40,5 +40,5 @@ distance, and more — is written up with its rejected alternative in
 - [x] Phase 3 — offer lifecycle, idempotent trip creation
 - [x] Phase 4 — Kafka event pipeline, surge pricing (see [docs/SURGE.md](docs/SURGE.md))
 - [x] Phase 5 — consistent hash ring, sharding, gossip membership
-- [ ] Phase 6 — load generation, benchmarking
+- [x] Phase 6 — load generation, benchmarking (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
 - [ ] Phase 7 — websocket gateway, map UI (optional)
