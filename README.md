@@ -5,7 +5,11 @@ DISCO dispatch system: supply and demand tracked as separate services with expli
 state machines, an H3 hexagonal spatial index used as the sharding key, and matching
 implemented as a ranked search over candidates rather than a nearest-neighbour lookup.
 
-**Status: in progress.** See the phase checklist below for what is built so far.
+Built as five services around a shared Redis and Kafka backbone: **disco** owns every
+match decision and shards itself across a consistent hash ring; **supply-service** and
+**demand-service** are thin HTTP fronts for drivers and riders; **surge-aggregator**
+computes a rolling supply/demand multiplier per cell from the same event stream; and a
+**gateway** pushes trip lifecycle events to a live map over WebSocket.
 
 ## Architecture
 
@@ -15,21 +19,44 @@ breakdown.
 ## Quickstart
 
 ```bash
-make up      # start Kafka, Redis, Prometheus
-make build   # compile supply, demand, disco, surge, loadgen
-make test    # run the test suite
+make up      # start Kafka, Redis, Prometheus (docker compose)
+make build   # compile all five services
+make run     # start disco, supply-service, demand-service, surge-aggregator, gateway
+```
+
+The map UI is then live at `http://localhost:8086`. Run `make stop` to tear the
+services down (`make down` stops the infra containers separately).
+
+Try it:
+
+```bash
+# A driver reports its position.
+curl -X POST localhost:8081/drivers/driver-1/location \
+  -d '{"lat":17.385,"lng":78.4867}'
+
+# A rider requests a ride. Idempotency-Key makes a retry of this exact
+# call return the same trip instead of creating a second one.
+curl -X POST localhost:8082/trips \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"rider_id":"rider-1","lat":17.385,"lng":78.4867}'
+
+# The driver polls for what it's been offered, then responds.
+curl localhost:8081/drivers/driver-1/offer
+curl -X POST localhost:8081/drivers/driver-1/offer/respond -d '{"response":"ACCEPTED"}'
 ```
 
 ## Benchmarks
 
-Headline numbers land in [docs/BENCHMARKS.md](docs/BENCHMARKS.md) once Phase 6 load
-testing is complete.
+Headline numbers, including three concurrency bugs load testing caught and fixed
+before they shipped, are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Surge pricing's
+rise-and-decay curve under synthetic demand is in [docs/SURGE.md](docs/SURGE.md).
 
 ## Design decisions
 
 Every non-obvious architectural choice — hexagons over squares, sharding by cell
 rather than driver, consistent hashing over modulo, ETA ranking over straight-line
-distance, and more — is written up with its rejected alternative in
+distance, offer timeouts over direct assignment, idempotency keys, and Redis as the
+sole source of truth — is written up with its rejected alternative in
 [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Phase checklist
@@ -41,4 +68,4 @@ distance, and more — is written up with its rejected alternative in
 - [x] Phase 4 — Kafka event pipeline, surge pricing (see [docs/SURGE.md](docs/SURGE.md))
 - [x] Phase 5 — consistent hash ring, sharding, gossip membership
 - [x] Phase 6 — load generation, benchmarking (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
-- [ ] Phase 7 — websocket gateway, map UI (optional)
+- [x] Phase 7 — websocket gateway, Leaflet + H3 map UI
