@@ -7,11 +7,17 @@ import (
 
 func newTestNode(t *testing.T, name string, seeds []string) *Membership {
 	t.Helper()
+	return newTestNodeWithGRPCAddr(t, name, seeds, "")
+}
+
+func newTestNodeWithGRPCAddr(t *testing.T, name string, seeds []string, grpcAddr string) *Membership {
+	t.Helper()
 	m, err := New(Config{
 		NodeName: name,
 		BindAddr: "127.0.0.1",
 		BindPort: 0,
 		Seeds:    seeds,
+		GRPCAddr: grpcAddr,
 	})
 	if err != nil {
 		t.Fatalf("New(%s): %v", name, err)
@@ -66,6 +72,25 @@ func TestLeaveRemovesNodeFromPeerRing(t *testing.T) {
 		nodes := node1.Ring().Nodes()
 		return len(nodes) == 1 && nodes[0] == "node-1"
 	}, "node1's ring to drop node-2 after it leaves")
+}
+
+func TestPeerGRPCAddrIsGossipedAsNodeMeta(t *testing.T) {
+	node1 := newTestNodeWithGRPCAddr(t, "node-1", nil, "127.0.0.1:9001")
+	node2 := newTestNodeWithGRPCAddr(t, "node-2", []string{node1.JoinAddr()}, "127.0.0.1:9002")
+
+	waitFor(t, 5*time.Second, func() bool {
+		addr, ok := node1.PeerGRPCAddr("node-2")
+		return ok && addr == "127.0.0.1:9002"
+	}, "node1 to learn node2's gRPC address via gossip")
+
+	waitFor(t, 5*time.Second, func() bool {
+		addr, ok := node2.PeerGRPCAddr("node-1")
+		return ok && addr == "127.0.0.1:9001"
+	}, "node2 to learn node1's gRPC address via gossip")
+
+	if _, ok := node1.PeerGRPCAddr("node-does-not-exist"); ok {
+		t.Fatalf("PeerGRPCAddr for an unknown node = ok, want false")
+	}
 }
 
 func TestThreeNodeClusterConverges(t *testing.T) {

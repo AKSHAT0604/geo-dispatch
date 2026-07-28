@@ -20,6 +20,7 @@ type Config struct {
 	BindPort     int      // 0 lets the OS assign an ephemeral port (tests)
 	Seeds        []string // existing cluster members to join through, "host:port"
 	VirtualNodes int      // hashring.DefaultVirtualNodes if not positive
+	GRPCAddr     string   // this node's "host:port" for DispatchService, gossiped as node metadata
 }
 
 // Membership gossips cluster membership and maintains a hashring.Ring that
@@ -39,6 +40,25 @@ func (d *eventDelegate) NotifyJoin(n *memberlist.Node)  { d.ring.AddNode(n.Name)
 func (d *eventDelegate) NotifyLeave(n *memberlist.Node) { d.ring.RemoveNode(n.Name) }
 func (d *eventDelegate) NotifyUpdate(*memberlist.Node)  {} // metadata changes don't move ring positions
 
+// metaDelegate attaches this node's gRPC address as gossiped metadata, so
+// a peer that looks this node up by name later (to route a request to it)
+// can find where to dial without a separate service discovery mechanism.
+type metaDelegate struct {
+	grpcAddr string
+}
+
+func (d *metaDelegate) NodeMeta(limit int) []byte {
+	b := []byte(d.grpcAddr)
+	if len(b) > limit {
+		b = b[:limit]
+	}
+	return b
+}
+func (d *metaDelegate) NotifyMsg([]byte)                           {}
+func (d *metaDelegate) GetBroadcasts(overhead, limit int) [][]byte { return nil }
+func (d *metaDelegate) LocalState(join bool) []byte                { return nil }
+func (d *metaDelegate) MergeRemoteState(buf []byte, join bool)     {}
+
 // New starts gossiping under cfg and returns a Membership whose ring
 // already contains this node. If Seeds is non-empty, it attempts to join
 // the existing cluster through them before returning.
@@ -53,6 +73,7 @@ func New(cfg Config) (*Membership, error) {
 	mlCfg.BindPort = cfg.BindPort
 	mlCfg.AdvertisePort = cfg.BindPort
 	mlCfg.Events = &eventDelegate{ring: ring}
+	mlCfg.Delegate = &metaDelegate{grpcAddr: cfg.GRPCAddr}
 
 	list, err := memberlist.Create(mlCfg)
 	if err != nil {
@@ -94,6 +115,17 @@ func (m *Membership) Members() []string {
 		names[i] = n.Name
 	}
 	return names
+}
+
+// PeerGRPCAddr returns the gRPC address nodeID advertised via gossip
+// metadata, if that node is currently known.
+func (m *Membership) PeerGRPCAddr(nodeID string) (string, bool) {
+	for _, n := range m.list.Members() {
+		if n.Name == nodeID {
+			return string(n.Meta), true
+		}
+	}
+	return "", false
 }
 
 // Leave gracefully leaves the cluster, giving other members up to timeout
