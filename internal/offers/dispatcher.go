@@ -98,21 +98,26 @@ func (d *Dispatcher) Run(ctx context.Context, tripID string, originCell h3.Cell,
 		return false, "", fmt.Errorf("trip %s is in terminal state %s, cannot dispatch", tripID, trip.State)
 	}
 
-	rounds := d.Cfg.MaxRounds
-	if rounds > len(candidates) {
-		rounds = len(candidates)
-	}
-
 	backoff := d.Cfg.BaseBackoff
 	roundsAttempted := 0
-	for round := 1; round <= rounds; round++ {
-		roundsAttempted = round
-		candidate := candidates[round-1]
-		driverID := candidate.Driver.DriverID
+	for i := 0; i < len(candidates) && roundsAttempted < d.Cfg.MaxRounds; i++ {
+		driverID := candidates[i].Driver.DriverID
 
+		// Candidate search ran before this loop started, so by the time a
+		// concurrent trip's dispatch reaches the same driver, both can
+		// rank it as AVAILABLE before either claims it. Losing that race
+		// is not this trip's failure - it just means the driver is gone;
+		// move on to the next candidate without spending a round or a
+		// backoff delay on it.
 		if err := d.Drivers.SetState(ctx, driverID, statemachine.DriverOffered); err != nil {
+			if _, ok := err.(statemachine.ErrIllegalDriverTransition); ok {
+				continue
+			}
 			return false, "", fmt.Errorf("offer to driver %s: %w", driverID, err)
 		}
+
+		roundsAttempted++
+		round := roundsAttempted
 		if err := d.Offers.CreateOffer(ctx, tripID, driverID, round, d.Cfg.OfferWindow); err != nil {
 			return false, "", fmt.Errorf("create offer round %d: %w", round, err)
 		}
@@ -156,7 +161,7 @@ func (d *Dispatcher) Run(ctx context.Context, tripID string, originCell h3.Cell,
 			return false, "", fmt.Errorf("release driver %s: %w", driverID, err)
 		}
 
-		if round < rounds {
+		if i+1 < len(candidates) && roundsAttempted < d.Cfg.MaxRounds {
 			if err := sleep(ctx, backoff); err != nil {
 				return false, "", err
 			}

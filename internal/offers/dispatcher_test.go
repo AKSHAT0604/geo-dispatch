@@ -231,6 +231,64 @@ func TestDispatcherMarksTripUnfulfilledWhenEveryCandidateTimesOut(t *testing.T) 
 	}
 }
 
+// TestDispatcherSkipsCandidateClaimedByConcurrentDispatch guards against a
+// real race found under load testing: candidate search ranks a snapshot of
+// AVAILABLE drivers before any offer is made, so two concurrent trips can
+// both rank the same driver before either claims it. Losing that race must
+// fall through to the next candidate, not abort the whole dispatch.
+func TestDispatcherSkipsCandidateClaimedByConcurrentDispatch(t *testing.T) {
+	dispatcher, drivers, trips := newTestDispatcher(t, fastConfig, nil)
+	ctx := context.Background()
+
+	if err := drivers.UpdateLocation(ctx, "driver-1", 17.3850, 78.4867); err != nil {
+		t.Fatalf("UpdateLocation driver-1: %v", err)
+	}
+	if err := drivers.UpdateLocation(ctx, "driver-2", 17.3860, 78.4870); err != nil {
+		t.Fatalf("UpdateLocation driver-2: %v", err)
+	}
+
+	// Simulate driver-1 having already been claimed by a concurrent
+	// dispatch for a different trip, which won the race to offer it first.
+	if err := drivers.SetState(ctx, "driver-1", statemachine.DriverOffered); err != nil {
+		t.Fatalf("SetState driver-1 OFFERED (simulating concurrent claim): %v", err)
+	}
+
+	trip, err := trips.CreateTrip(ctx, "rider-1", 17.3850, 78.4867, "idem-key")
+	if err != nil {
+		t.Fatalf("CreateTrip: %v", err)
+	}
+
+	candidates := []matching.RankedCandidate{
+		{Driver: &store.DriverRecord{DriverID: "driver-1"}},
+		{Driver: &store.DriverRecord{DriverID: "driver-2"}},
+	}
+
+	go acceptWhenOffered(t, dispatcher, trip.TripID, "driver-2")
+
+	start := time.Now()
+	matched, driverID, err := dispatcher.Run(ctx, trip.TripID, testOriginCell, candidates)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !matched || driverID != "driver-2" {
+		t.Fatalf("Run = matched=%v driverID=%s, want matched=true driverID=driver-2", matched, driverID)
+	}
+	// Skipping the already-claimed driver-1 must not spend a backoff
+	// delay: driver-2 should be offered almost immediately.
+	if elapsed > fastConfig.BaseBackoff {
+		t.Fatalf("Run took %s to reach driver-2, want well under one backoff interval (%s)", elapsed, fastConfig.BaseBackoff)
+	}
+
+	offer, err := dispatcher.Offers.GetOffer(ctx, trip.TripID)
+	if err != nil {
+		t.Fatalf("GetOffer: %v", err)
+	}
+	if offer.Round != 1 {
+		t.Fatalf("driver-2's offer round = %d, want 1: a skipped candidate must not consume a round", offer.Round)
+	}
+}
+
 func TestDispatcherMarksTripUnfulfilledWithNoCandidates(t *testing.T) {
 	dispatcher, _, trips := newTestDispatcher(t, fastConfig, nil)
 	ctx := context.Background()
