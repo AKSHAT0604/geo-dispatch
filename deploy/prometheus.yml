@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: supply-service
+    static_configs:
+      - targets: ["host.docker.internal:8081"]
+
+  - job_name: demand-service
+    static_configs:
+      - targets: ["host.docker.internal:8082"]
+
+  - job_name: disco
+    static_configs:
+      - targets: ["host.docker.internal:8083"]
+
+  - job_name: surge-aggregator
+    static_configs:
+      - targets: ["host.docker.internal:8084"]
