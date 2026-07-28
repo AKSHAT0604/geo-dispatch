@@ -15,9 +15,11 @@ const (
 // tripTransitions enumerates every legal next state. A trip enters OFFERED
 // once its first offer goes out and stays there across every reoffer round
 // - the round-by-round detail lives in the offer state machine, not here -
-// until it either matches or exhausts its reoffer rounds.
+// until it either matches or exhausts its reoffer rounds. REQUESTED can
+// also go straight to UNFULFILLED: candidate search can legitimately find
+// no one at all, in which case no offer is ever made.
 var tripTransitions = map[TripState]map[TripState]bool{
-	TripRequested: {TripOffered: true},
+	TripRequested: {TripOffered: true, TripUnfulfilled: true},
 	TripOffered:   {TripMatched: true, TripUnfulfilled: true},
 }
 

@@ -5,6 +5,7 @@ import "testing"
 func TestValidateTripTransitionAllowsHappyPaths(t *testing.T) {
 	cases := [][2]TripState{
 		{TripRequested, TripOffered},
+		{TripRequested, TripUnfulfilled},
 		{TripOffered, TripMatched},
 		{TripOffered, TripUnfulfilled},
 	}
@@ -18,7 +19,6 @@ func TestValidateTripTransitionAllowsHappyPaths(t *testing.T) {
 func TestValidateTripTransitionRejectsIllegalJumps(t *testing.T) {
 	cases := [][2]TripState{
 		{TripRequested, TripMatched},
-		{TripRequested, TripUnfulfilled},
 		{TripMatched, TripOffered},
 		{TripUnfulfilled, TripOffered},
 		{TripMatched, TripUnfulfilled},
