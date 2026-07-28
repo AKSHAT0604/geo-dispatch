@@ -35,7 +35,7 @@ distance, and more — is written up with its rejected alternative in
 ## Phase checklist
 
 - [x] Phase 0 — scaffolding, infra, health checks
-- [ ] Phase 1 — H3 indexing, Redis driver location store
+- [x] Phase 1 — H3 indexing, Redis driver location store
 - [ ] Phase 2 — matching engine
 - [ ] Phase 3 — offer lifecycle, idempotent trip creation
 - [ ] Phase 4 — Kafka event pipeline, surge pricing
