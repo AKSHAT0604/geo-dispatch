@@ -129,8 +129,16 @@ func (s *TripStore) GetTrip(ctx context.Context, tripID string) (*TripRecord, er
 	}, nil
 }
 
+// offeredTripsKey indexes trips currently in OFFERED state, so a
+// reconciliation sweep after a node handoff can find in-flight trips
+// without scanning the whole keyspace. It's an index for recovery, not a
+// correctness-critical invariant like driver cell indexing - eventual
+// consistency with the trip hash's actual state is fine here.
+const offeredTripsKey = "trips:offered"
+
 // transitionTo validates and persists a trip state change, writing any
-// extra hash fields alongside it in the same call.
+// extra hash fields alongside it in the same call, and keeps the
+// offered-trips index consistent with the new state.
 func (s *TripStore) transitionTo(ctx context.Context, tripID string, to statemachine.TripState, extra ...interface{}) error {
 	current, err := s.rdb.HGet(ctx, tripKey(tripID), "state").Result()
 	if errors.Is(err, redis.Nil) {
@@ -146,7 +154,26 @@ func (s *TripStore) transitionTo(ctx context.Context, tripID string, to statemac
 	}
 
 	fields := append([]interface{}{"state", string(to)}, extra...)
-	return s.rdb.HSet(ctx, tripKey(tripID), fields...).Err()
+	if err := s.rdb.HSet(ctx, tripKey(tripID), fields...).Err(); err != nil {
+		return err
+	}
+
+	switch to {
+	case statemachine.TripOffered:
+		return s.rdb.SAdd(ctx, offeredTripsKey, tripID).Err()
+	case statemachine.TripMatched, statemachine.TripUnfulfilled:
+		return s.rdb.SRem(ctx, offeredTripsKey, tripID).Err()
+	}
+	return nil
+}
+
+// OfferedTrips returns the IDs of every trip currently in OFFERED state.
+func (s *TripStore) OfferedTrips(ctx context.Context) ([]string, error) {
+	ids, err := s.rdb.SMembers(ctx, offeredTripsKey).Result()
+	if err != nil {
+		return nil, fmt.Errorf("smembers: %w", err)
+	}
+	return ids, nil
 }
 
 // SetTripState validates and persists a trip state transition.

@@ -58,18 +58,40 @@ func NewDispatcher(offerStore *store.OfferStore, tripStore *store.TripStore, dri
 // by hanging. originCell is the trip's origin cell, carried on every
 // published event so consumers never need to recompute geography.
 func (d *Dispatcher) Run(ctx context.Context, tripID string, originCell h3.Cell, candidates []matching.RankedCandidate) (matched bool, driverID string, err error) {
-	if len(candidates) == 0 {
-		if err := d.Trips.MarkUnfulfilled(ctx, tripID); err != nil {
-			return false, "", err
+	trip, err := d.Trips.GetTrip(ctx, tripID)
+	if err != nil {
+		return false, "", fmt.Errorf("get trip: %w", err)
+	}
+	// Run is also the entry point a reconciliation sweep resumes a stuck
+	// trip through after a node crash mid-dispatch (see Reconciler): that
+	// trip is already OFFERED from its first attempt, and re-validating
+	// REQUESTED -> OFFERED against the state machine would reject it. Any
+	// other non-REQUESTED, non-OFFERED state means the trip already
+	// reached a terminal outcome and must not be re-dispatched.
+	switch trip.State {
+	case statemachine.TripRequested:
+		if len(candidates) == 0 {
+			if err := d.Trips.MarkUnfulfilled(ctx, tripID); err != nil {
+				return false, "", err
+			}
+			d.publishTrip(ctx, tripID, originCell, statemachine.TripUnfulfilled, "")
+			return false, "", nil
 		}
-		d.publishTrip(ctx, tripID, originCell, statemachine.TripUnfulfilled, "")
-		return false, "", nil
+		if err := d.Trips.SetTripState(ctx, tripID, statemachine.TripOffered); err != nil {
+			return false, "", fmt.Errorf("mark trip offered: %w", err)
+		}
+		d.publishTrip(ctx, tripID, originCell, statemachine.TripOffered, "")
+	case statemachine.TripOffered:
+		if len(candidates) == 0 {
+			if err := d.Trips.MarkUnfulfilled(ctx, tripID); err != nil {
+				return false, "", err
+			}
+			d.publishTrip(ctx, tripID, originCell, statemachine.TripUnfulfilled, "")
+			return false, "", nil
+		}
+	default:
+		return false, "", fmt.Errorf("trip %s is in terminal state %s, cannot dispatch", tripID, trip.State)
 	}
-
-	if err := d.Trips.SetTripState(ctx, tripID, statemachine.TripOffered); err != nil {
-		return false, "", fmt.Errorf("mark trip offered: %w", err)
-	}
-	d.publishTrip(ctx, tripID, originCell, statemachine.TripOffered, "")
 
 	rounds := d.Cfg.MaxRounds
 	if rounds > len(candidates) {

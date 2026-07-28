@@ -115,3 +115,66 @@ func TestGetTripUnknownReturnsErrTripNotFound(t *testing.T) {
 		t.Fatalf("GetTrip(unknown) error = %v, want ErrTripNotFound", err)
 	}
 }
+
+func TestOfferedTripsIndexTracksOfferedState(t *testing.T) {
+	store := newTestTripStore(t)
+	ctx := context.Background()
+
+	tripA, err := store.CreateTrip(ctx, "rider-1", 17.3850, 78.4867, "idem-a")
+	if err != nil {
+		t.Fatalf("CreateTrip A: %v", err)
+	}
+	tripB, err := store.CreateTrip(ctx, "rider-2", 17.3850, 78.4867, "idem-b")
+	if err != nil {
+		t.Fatalf("CreateTrip B: %v", err)
+	}
+
+	if ids, err := store.OfferedTrips(ctx); err != nil || len(ids) != 0 {
+		t.Fatalf("OfferedTrips before any offer = %v, %v; want empty", ids, err)
+	}
+
+	if err := store.SetTripState(ctx, tripA.TripID, statemachine.TripOffered); err != nil {
+		t.Fatalf("SetTripState A OFFERED: %v", err)
+	}
+	if err := store.SetTripState(ctx, tripB.TripID, statemachine.TripOffered); err != nil {
+		t.Fatalf("SetTripState B OFFERED: %v", err)
+	}
+
+	ids, err := store.OfferedTrips(ctx)
+	if err != nil {
+		t.Fatalf("OfferedTrips: %v", err)
+	}
+	if !equalUnordered(ids, []string{tripA.TripID, tripB.TripID}) {
+		t.Fatalf("OfferedTrips = %v, want [%s %s]", ids, tripA.TripID, tripB.TripID)
+	}
+
+	if err := store.MarkMatched(ctx, tripA.TripID, "driver-1"); err != nil {
+		t.Fatalf("MarkMatched A: %v", err)
+	}
+	ids, err = store.OfferedTrips(ctx)
+	if err != nil {
+		t.Fatalf("OfferedTrips after match: %v", err)
+	}
+	if !equalUnordered(ids, []string{tripB.TripID}) {
+		t.Fatalf("OfferedTrips after A matched = %v, want [%s]", ids, tripB.TripID)
+	}
+}
+
+func equalUnordered(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int)
+	for _, x := range a {
+		seen[x]++
+	}
+	for _, x := range b {
+		seen[x]--
+	}
+	for _, v := range seen {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
+}
