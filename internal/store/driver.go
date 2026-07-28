@@ -28,11 +28,12 @@ var ErrDriverNotFound = errors.New("store: driver not found")
 
 // DriverRecord is a driver's last known position and state.
 type DriverRecord struct {
-	DriverID  string
-	Lat, Lng  float64
-	Cell      h3.Cell
-	State     statemachine.DriverState
-	UpdatedAt time.Time
+	DriverID       string
+	Lat, Lng       float64
+	Cell           h3.Cell
+	State          statemachine.DriverState
+	UpdatedAt      time.Time
+	AvailableSince time.Time // zero if the driver has never been AVAILABLE
 }
 
 // DriverStore persists driver location and state in Redis, keeping each
@@ -92,15 +93,27 @@ func (s *DriverStore) UpdateLocation(ctx context.Context, driverID string, lat, 
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("read existing state: %w", err)
 	}
+	isNew := existingState == ""
 	state := statemachine.DriverAvailable
-	if existingState != "" {
+	if !isNew {
 		state = statemachine.DriverState(existingState)
 	}
 
-	return moveDriverScript.Run(ctx, s.rdb,
+	if err := moveDriverScript.Run(ctx, s.rdb,
 		[]string{driverKey(driverID), cellKey(cell)},
 		driverID, lat, lng, cell.String(), string(state), time.Now().Unix(), int(DriverLocationTTL.Seconds()),
-	).Err()
+	).Err(); err != nil {
+		return err
+	}
+
+	if isNew {
+		// A brand new driver starts AVAILABLE, so its idle clock starts now.
+		// HSetNX so a later ping never resets an idle clock already running.
+		if err := s.rdb.HSetNX(ctx, driverKey(driverID), "available_since", time.Now().Unix()).Err(); err != nil {
+			return fmt.Errorf("set available_since: %w", err)
+		}
+	}
+	return nil
 }
 
 // SetState validates and persists a driver state transition. It does not
@@ -117,6 +130,12 @@ func (s *DriverStore) SetState(ctx context.Context, driverID string, to statemac
 	from := statemachine.DriverState(current)
 	if err := statemachine.ValidateDriverTransition(from, to); err != nil {
 		return err
+	}
+
+	if to == statemachine.DriverAvailable {
+		// Becoming available (again) restarts the idle clock the fairness
+		// ranking term reads from.
+		return s.rdb.HSet(ctx, driverKey(driverID), "state", string(to), "available_since", time.Now().Unix()).Err()
 	}
 	return s.rdb.HSet(ctx, driverKey(driverID), "state", string(to)).Err()
 }
@@ -145,13 +164,23 @@ func (s *DriverStore) GetDriver(ctx context.Context, driverID string) (*DriverRe
 		return nil, fmt.Errorf("parse updated_at: %w", err)
 	}
 
+	var availableSince time.Time
+	if raw, ok := fields["available_since"]; ok && raw != "" {
+		unix, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse available_since: %w", err)
+		}
+		availableSince = time.Unix(unix, 0)
+	}
+
 	return &DriverRecord{
-		DriverID:  driverID,
-		Lat:       lat,
-		Lng:       lng,
-		Cell:      h3.CellFromString(fields["cell"]),
-		State:     statemachine.DriverState(fields["state"]),
-		UpdatedAt: time.Unix(updatedAtUnix, 0),
+		DriverID:       driverID,
+		Lat:            lat,
+		Lng:            lng,
+		Cell:           h3.CellFromString(fields["cell"]),
+		State:          statemachine.DriverState(fields["state"]),
+		UpdatedAt:      time.Unix(updatedAtUnix, 0),
+		AvailableSince: availableSince,
 	}, nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -101,6 +102,49 @@ func TestSetStateRejectsIllegalTransition(t *testing.T) {
 	}
 	if err := store.SetState(ctx, "d1", statemachine.DriverOffered); err != nil {
 		t.Fatalf("SetState(AVAILABLE, OFFERED): %v", err)
+	}
+}
+
+func TestAvailableSinceSetOnCreateAndRefreshedOnReturnToAvailable(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+
+	if err := store.UpdateLocation(ctx, "d1", 17.3850, 78.4867); err != nil {
+		t.Fatalf("UpdateLocation: %v", err)
+	}
+	first, err := store.GetDriver(ctx, "d1")
+	if err != nil {
+		t.Fatalf("GetDriver: %v", err)
+	}
+	if first.AvailableSince.IsZero() {
+		t.Fatalf("AvailableSince not set on a newly created driver")
+	}
+
+	// A location ping while still AVAILABLE must not reset the idle clock.
+	if err := store.UpdateLocation(ctx, "d1", 17.3860, 78.4870); err != nil {
+		t.Fatalf("UpdateLocation (second ping): %v", err)
+	}
+	second, err := store.GetDriver(ctx, "d1")
+	if err != nil {
+		t.Fatalf("GetDriver: %v", err)
+	}
+	if !second.AvailableSince.Equal(first.AvailableSince) {
+		t.Fatalf("AvailableSince changed on a location ping: %v -> %v", first.AvailableSince, second.AvailableSince)
+	}
+
+	if err := store.SetState(ctx, "d1", statemachine.DriverOffered); err != nil {
+		t.Fatalf("SetState(AVAILABLE, OFFERED): %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond) // ensure a distinguishable unix-second timestamp
+	if err := store.SetState(ctx, "d1", statemachine.DriverAvailable); err != nil {
+		t.Fatalf("SetState(OFFERED, AVAILABLE): %v", err)
+	}
+	third, err := store.GetDriver(ctx, "d1")
+	if err != nil {
+		t.Fatalf("GetDriver: %v", err)
+	}
+	if !third.AvailableSince.After(first.AvailableSince) {
+		t.Fatalf("AvailableSince not refreshed on return to AVAILABLE: %v -> %v", first.AvailableSince, third.AvailableSince)
 	}
 }
 
