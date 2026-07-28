@@ -27,7 +27,21 @@ _To be answered once Phase 5 (hash ring) is complete._
 
 ## 4. Why rank by travel time rather than straight-line distance?
 
-_To be answered once Phase 2 (matching engine) is complete._
+Straight-line distance is a poor proxy for pickup time: a driver 400m away across a
+highway with no crossing for a kilometer is farther, in the metric that actually
+matters to the rider, than one 800m away on a direct surface street. Ranking by ETA
+means the number being optimized is the number the rider experiences. The rejected
+alternative - sorting candidates by haversine distance - is what `HaversineEstimator`
+implements as a baseline, precisely so it can be swapped for `CongestionAwareEstimator`
+behind the same `ETAEstimator` interface without touching the ranking code that
+consumes it. That interface is also the intended seam for a learned ETA model (a
+separate project) to plug in later without another rewrite of `internal/matching`.
+
+Ranking also isn't pure ETA: a small idle-time discount lets a driver who has been
+waiting significantly longer occasionally beat one that's marginally closer. Without
+it, the same centrally-located drivers absorb every trip while drivers idling at the
+edge of a cell's coverage never get offered one - real dispatch has to balance rider
+wait time against driver earnings equity, not just minimize the former.
 
 ## 5. Why an offer state machine with timeouts rather than direct assignment?
 
