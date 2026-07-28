@@ -6,9 +6,9 @@ SERVICES := supply demand disco surge loadgen
 
 proto:
 	@which protoc >/dev/null 2>&1 || (echo "protoc not found; install https://grpc.io/docs/protoc-installation/" && exit 1)
-	protoc \
-		--go_out=. --go_opt=paths=source_relative \
-		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+	protoc --proto_path=api/proto \
+		--go_out=. --go_opt=module=$(MODULE) \
+		--go-grpc_out=. --go-grpc_opt=module=$(MODULE) \
 		api/proto/*.proto
 
 build:

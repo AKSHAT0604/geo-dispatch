@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package dispatch.v1;
+
+option go_package = "github.com/AKSHAT0604/geo-dispatch/api/proto/dispatchpb";
+
+// DispatchService is exposed by every disco node. A node that receives a
+// request for a cell it does not own forwards it here, to the node that
+// does, rather than answering for a cell it isn't authoritative over.
+service DispatchService {
+  // Dispatch runs the full match-and-offer pipeline for a ride request
+  // whose origin cell this node owns.
+  rpc Dispatch(DispatchRequest) returns (DispatchResponse);
+}
+
+message DispatchRequest {
+  string rider_id = 1;
+  double origin_lat = 2;
+  double origin_lng = 3;
+  string idempotency_key = 4;
+}
+
+message DispatchResponse {
+  string trip_id = 1;
+  bool matched = 2;
+  string driver_id = 3;
+  string state = 4;
+}
