@@ -46,9 +46,13 @@ func NewOfferStore(rdb *redis.Client) *OfferStore {
 	return &OfferStore{rdb: rdb}
 }
 
-func offerKey(tripID string) string { return "offer:" + tripID }
+func offerKey(tripID string) string         { return "offer:" + tripID }
+func driverOfferKey(driverID string) string { return "driver_offer:" + driverID }
 
-// CreateOffer opens a new offer for tripID, replacing any previous one.
+// CreateOffer opens a new offer for tripID, replacing any previous one. It
+// also records a driverID -> tripID reverse index (same TTL) so a driver's
+// client can find what it's been offered without already knowing the trip
+// ID - it only ever knows its own driver ID.
 func (s *OfferStore) CreateOffer(ctx context.Context, tripID, driverID string, round int, ttl time.Duration) error {
 	key := offerKey(tripID)
 	pipe := s.rdb.TxPipeline()
@@ -59,10 +63,24 @@ func (s *OfferStore) CreateOffer(ctx context.Context, tripID, driverID string, r
 		"created_at", time.Now().Unix(),
 	)
 	pipe.Expire(ctx, key, ttl)
+	pipe.Set(ctx, driverOfferKey(driverID), tripID, ttl)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("create offer: %w", err)
 	}
 	return nil
+}
+
+// CurrentOfferFor returns the trip ID currently offered to driverID, or
+// ErrOfferNotFound if it has none open right now.
+func (s *OfferStore) CurrentOfferFor(ctx context.Context, driverID string) (string, error) {
+	tripID, err := s.rdb.Get(ctx, driverOfferKey(driverID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", ErrOfferNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("get driver offer: %w", err)
+	}
+	return tripID, nil
 }
 
 // GetOffer returns the offer currently open for tripID.
@@ -109,5 +127,11 @@ func (s *OfferStore) SetOfferState(ctx context.Context, tripID, driverID string,
 	if err := statemachine.ValidateOfferTransition(rec.State, to); err != nil {
 		return err
 	}
-	return s.rdb.HSet(ctx, offerKey(tripID), "state", string(to)).Err()
+	if err := s.rdb.HSet(ctx, offerKey(tripID), "state", string(to)).Err(); err != nil {
+		return err
+	}
+	// Every transition out of PENDING is terminal (see statemachine.OfferState),
+	// so the reverse index is no longer accurate and must not point a
+	// later poll at a round that's already resolved.
+	return s.rdb.Del(ctx, driverOfferKey(driverID)).Err()
 }

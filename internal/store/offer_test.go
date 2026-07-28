@@ -65,6 +65,30 @@ func TestSetOfferStateRejectsStaleDriver(t *testing.T) {
 	}
 }
 
+func TestCurrentOfferForTracksAndClearsOnResolution(t *testing.T) {
+	store, _ := newTestOfferStore(t)
+	ctx := context.Background()
+
+	if _, err := store.CurrentOfferFor(ctx, "driver-1"); err != ErrOfferNotFound {
+		t.Fatalf("CurrentOfferFor before any offer = %v, want ErrOfferNotFound", err)
+	}
+
+	if err := store.CreateOffer(ctx, "trip-1", "driver-1", 1, 15*time.Second); err != nil {
+		t.Fatalf("CreateOffer: %v", err)
+	}
+	tripID, err := store.CurrentOfferFor(ctx, "driver-1")
+	if err != nil || tripID != "trip-1" {
+		t.Fatalf("CurrentOfferFor = %q, %v; want trip-1, nil", tripID, err)
+	}
+
+	if err := store.SetOfferState(ctx, "trip-1", "driver-1", statemachine.OfferDeclined); err != nil {
+		t.Fatalf("SetOfferState(DECLINED): %v", err)
+	}
+	if _, err := store.CurrentOfferFor(ctx, "driver-1"); err != ErrOfferNotFound {
+		t.Fatalf("CurrentOfferFor after resolution = %v, want ErrOfferNotFound", err)
+	}
+}
+
 func TestOfferExpiresWithTTL(t *testing.T) {
 	store, mr := newTestOfferStore(t)
 	ctx := context.Background()
