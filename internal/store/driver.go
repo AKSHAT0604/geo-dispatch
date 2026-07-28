@@ -66,10 +66,20 @@ func cellKey(cell h3.Cell) string      { return "cell:" + cell.String() + ":driv
 
 // moveDriverScript atomically removes a driver from its previous cell set
 // (if it had one and it changed), adds it to the new cell set, and writes
-// its location hash with a fresh TTL. Doing this in one Lua script is what
-// guarantees a driver is never indexed under two cells or zero: without it,
-// a crash between the SREM and the SADD would leave it dangling one way or
-// the other.
+// its location hash with a fresh TTL, returning the driver's state. Doing
+// this in one Lua script is what guarantees a driver is never indexed
+// under two cells or zero: without it, a crash between the SREM and the
+// SADD would leave it dangling one way or the other.
+//
+// State is read and preserved inside the script itself, rather than being
+// read in Go and passed in as an argument, because a location ping and a
+// concurrent dispatch's SetState call race on the same driver hash: a
+// ping that read state before an offer arrived and only writes it back
+// afterward would silently revert AVAILABLE -> OFFERED back to AVAILABLE,
+// which is exactly the bug load testing caught (a driver stuck AVAILABLE
+// after accepting an offer, because a ping clobbered its OFFERED state
+// mid-flight). Reading state inside the same atomic script that writes it
+// closes that window entirely.
 var moveDriverScript = redis.NewScript(`
 local driverKey  = KEYS[1]
 local newCellKey = KEYS[2]
@@ -77,53 +87,48 @@ local driverID   = ARGV[1]
 local lat        = ARGV[2]
 local lng        = ARGV[3]
 local newCell    = ARGV[4]
-local state      = ARGV[5]
-local updatedAt  = ARGV[6]
-local ttl        = tonumber(ARGV[7])
+local updatedAt  = ARGV[5]
+local ttl        = tonumber(ARGV[6])
 
 local oldCell = redis.call('HGET', driverKey, 'cell')
 if oldCell and oldCell ~= newCell then
 	redis.call('SREM', 'cell:' .. oldCell .. ':drivers', driverID)
 end
 
+local state = redis.call('HGET', driverKey, 'state')
+if not state then
+	state = 'AVAILABLE'
+end
+
 redis.call('SADD', newCellKey, driverID)
 redis.call('HSET', driverKey, 'lat', lat, 'lng', lng, 'cell', newCell, 'state', state, 'updated_at', updatedAt)
 redis.call('EXPIRE', driverKey, ttl)
-return 1
+return state
 `)
 
 // UpdateLocation records a driver's new position, atomically moving it
-// between H3 cell sets if the cell changed. A driver not seen before starts
-// in AVAILABLE.
+// between H3 cell sets if the cell changed, and preserving its current
+// state - or defaulting it to AVAILABLE if this driver has never been
+// seen before.
 func (s *DriverStore) UpdateLocation(ctx context.Context, driverID string, lat, lng float64) error {
 	cell, err := h3index.CellFor(lat, lng, s.res)
 	if err != nil {
 		return fmt.Errorf("cell for (%f, %f): %w", lat, lng, err)
 	}
 
-	existingState, err := s.rdb.HGet(ctx, driverKey(driverID), "state").Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return fmt.Errorf("read existing state: %w", err)
-	}
-	isNew := existingState == ""
-	state := statemachine.DriverAvailable
-	if !isNew {
-		state = statemachine.DriverState(existingState)
-	}
-
-	if err := moveDriverScript.Run(ctx, s.rdb,
+	state, err := moveDriverScript.Run(ctx, s.rdb,
 		[]string{driverKey(driverID), cellKey(cell)},
-		driverID, lat, lng, cell.String(), string(state), time.Now().Unix(), int(DriverLocationTTL.Seconds()),
-	).Err(); err != nil {
+		driverID, lat, lng, cell.String(), time.Now().Unix(), int(DriverLocationTTL.Seconds()),
+	).Text()
+	if err != nil {
 		return err
 	}
 
-	if isNew {
-		// A brand new driver starts AVAILABLE, so its idle clock starts now.
-		// HSetNX so a later ping never resets an idle clock already running.
-		if err := s.rdb.HSetNX(ctx, driverKey(driverID), "available_since", time.Now().Unix()).Err(); err != nil {
-			return fmt.Errorf("set available_since: %w", err)
-		}
+	// HSetNX is a no-op if available_since is already set, so it's safe to
+	// call unconditionally on every ping rather than needing to already
+	// know whether this driver is new.
+	if err := s.rdb.HSetNX(ctx, driverKey(driverID), "available_since", time.Now().Unix()).Err(); err != nil {
+		return fmt.Errorf("set available_since: %w", err)
 	}
 
 	_ = s.publisher.PublishDriverLocation(ctx, events.DriverLocationEvent{
@@ -131,7 +136,7 @@ func (s *DriverStore) UpdateLocation(ctx context.Context, driverID string, lat, 
 		Lat:       lat,
 		Lng:       lng,
 		Cell:      cell.String(),
-		State:     string(state),
+		State:     state,
 		Timestamp: time.Now(),
 	})
 	return nil

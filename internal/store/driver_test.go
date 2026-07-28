@@ -21,6 +21,40 @@ func newTestStore(t *testing.T) (*DriverStore, *redis.Client) {
 	return NewDriverStore(rdb, h3index.DefaultResolution), rdb
 }
 
+// TestUpdateLocationPreservesConcurrentStateChange guards against a real
+// bug load testing caught: UpdateLocation used to read a driver's state in
+// Go and write that same value back inside its Lua script, so a location
+// ping racing with a dispatcher's SetState call could silently revert
+// OFFERED back to AVAILABLE, corrupting an in-flight offer. State must now
+// be read and preserved inside the script itself, atomically with the
+// write.
+func TestUpdateLocationPreservesConcurrentStateChange(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+
+	if err := store.UpdateLocation(ctx, "d1", 17.3850, 78.4867); err != nil {
+		t.Fatalf("UpdateLocation (initial): %v", err)
+	}
+	if err := store.SetState(ctx, "d1", statemachine.DriverOffered); err != nil {
+		t.Fatalf("SetState(OFFERED): %v", err)
+	}
+
+	// A location ping arriving after the driver was offered - as a
+	// driver's client keeps reporting position while awaiting a response -
+	// must not revert the state an in-flight offer just set.
+	if err := store.UpdateLocation(ctx, "d1", 17.3860, 78.4870); err != nil {
+		t.Fatalf("UpdateLocation (after offer): %v", err)
+	}
+
+	got, err := store.GetDriver(ctx, "d1")
+	if err != nil {
+		t.Fatalf("GetDriver: %v", err)
+	}
+	if got.State != statemachine.DriverOffered {
+		t.Fatalf("state after location ping = %s, want OFFERED (ping must not clobber a concurrent state change)", got.State)
+	}
+}
+
 func TestUpdateLocationMovesDriverBetweenCells(t *testing.T) {
 	store, rdb := newTestStore(t)
 	ctx := context.Background()
