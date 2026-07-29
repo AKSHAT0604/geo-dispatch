@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -130,6 +131,18 @@ func main() {
 		w.Write([]byte("ok"))
 	})
 	mux.Handle("/metrics", promhttp.Handler())
+	// /debug/ring is operational visibility into cluster membership as
+	// this node's ring currently sees it - useful for confirming a
+	// rebalance actually happened after a node join or failure, not just
+	// for local testing.
+	mux.HandleFunc("/debug/ring", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"local_node":     nodeName,
+			"gossip_members": member.Members(),
+			"ring_nodes":     member.Ring().Nodes(),
+		})
+	})
 	httpSrv := &http.Server{Addr: ":" + httpPort, Handler: mux}
 	go func() {
 		log.Printf("disco: http listening on :%s", httpPort)
