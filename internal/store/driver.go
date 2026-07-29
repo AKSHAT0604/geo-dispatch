@@ -176,7 +176,47 @@ func (s *DriverStore) GetDriver(ctx context.Context, driverID string) (*DriverRe
 	if len(fields) == 0 {
 		return nil, ErrDriverNotFound
 	}
+	return parseDriverRecord(driverID, fields)
+}
 
+// GetDrivers returns records for multiple drivers in a single pipelined
+// round trip, keyed by driver ID. A driver whose location has expired (or
+// who was never seen) is silently omitted rather than erroring - the same
+// treatment GetDriver gives a single miss. Candidate search calls this
+// once per cell instead of one HGETALL per candidate, since a densely
+// populated cell doing those sequentially is what saturates the Redis
+// connection pool under real load: each additional candidate used to add
+// a full network round trip, serialized, before ranking could even begin.
+func (s *DriverStore) GetDrivers(ctx context.Context, driverIDs []string) (map[string]*DriverRecord, error) {
+	if len(driverIDs) == 0 {
+		return nil, nil
+	}
+
+	pipe := s.rdb.Pipeline()
+	cmds := make(map[string]*redis.MapStringStringCmd, len(driverIDs))
+	for _, id := range driverIDs {
+		cmds[id] = pipe.HGetAll(ctx, driverKey(id))
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("pipeline hgetall: %w", err)
+	}
+
+	out := make(map[string]*DriverRecord, len(driverIDs))
+	for id, cmd := range cmds {
+		fields := cmd.Val()
+		if len(fields) == 0 {
+			continue
+		}
+		rec, err := parseDriverRecord(id, fields)
+		if err != nil {
+			return nil, fmt.Errorf("parse driver %s: %w", id, err)
+		}
+		out[id] = rec
+	}
+	return out, nil
+}
+
+func parseDriverRecord(driverID string, fields map[string]string) (*DriverRecord, error) {
 	lat, err := strconv.ParseFloat(fields["lat"], 64)
 	if err != nil {
 		return nil, fmt.Errorf("parse lat: %w", err)

@@ -21,6 +21,54 @@ func newTestStore(t *testing.T) (*DriverStore, *redis.Client) {
 	return NewDriverStore(rdb, h3index.DefaultResolution), rdb
 }
 
+// TestGetDriversBatchesLookupAndSkipsMissing is the regression test for the
+// scaling fix load testing at 50,000 drivers surfaced: candidate search
+// was doing one HGETALL per candidate instead of a single pipelined round
+// trip per cell, which saturated the Redis connection pool under real
+// concurrent load. Asserts the batch call returns exactly the live
+// drivers, keyed by ID, and silently omits IDs with no record.
+func TestGetDriversBatchesLookupAndSkipsMissing(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+
+	for _, id := range []string{"d1", "d2", "d3"} {
+		if err := store.UpdateLocation(ctx, id, 17.3850, 78.4867); err != nil {
+			t.Fatalf("UpdateLocation(%s): %v", id, err)
+		}
+	}
+
+	got, err := store.GetDrivers(ctx, []string{"d1", "d2", "d3", "does-not-exist"})
+	if err != nil {
+		t.Fatalf("GetDrivers: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("GetDrivers returned %d records, want 3 (missing ID silently omitted)", len(got))
+	}
+	for _, id := range []string{"d1", "d2", "d3"} {
+		rec, ok := got[id]
+		if !ok {
+			t.Fatalf("GetDrivers missing expected driver %s", id)
+		}
+		if rec.DriverID != id {
+			t.Fatalf("GetDrivers[%s].DriverID = %q, want %q", id, rec.DriverID, id)
+		}
+	}
+	if _, ok := got["does-not-exist"]; ok {
+		t.Fatalf("GetDrivers returned a record for a driver that was never seen")
+	}
+}
+
+func TestGetDriversWithEmptyInputReturnsNil(t *testing.T) {
+	store, _ := newTestStore(t)
+	got, err := store.GetDrivers(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("GetDrivers: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("GetDrivers(nil) = %v, want nil", got)
+	}
+}
+
 // TestUpdateLocationPreservesConcurrentStateChange guards against a real
 // bug load testing caught: UpdateLocation used to read a driver's state in
 // Go and write that same value back inside its Lua script, so a location

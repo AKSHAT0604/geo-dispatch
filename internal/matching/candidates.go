@@ -17,7 +17,7 @@ import (
 // Redis-backed store.
 type DriverLookup interface {
 	DriversInCell(ctx context.Context, cell h3.Cell) ([]string, error)
-	GetDriver(ctx context.Context, driverID string) (*store.DriverRecord, error)
+	GetDrivers(ctx context.Context, driverIDs []string) (map[string]*store.DriverRecord, error)
 }
 
 // SearchConfig bounds how far and how wide candidate search looks before
@@ -58,13 +58,23 @@ func FindCandidates(ctx context.Context, lookup DriverLookup, origin h3.Cell, cf
 			if err != nil {
 				return nil, fmt.Errorf("drivers in cell %s: %w", cell, err)
 			}
+			if len(ids) == 0 {
+				continue
+			}
+
+			// One pipelined round trip for every candidate in this cell,
+			// not one per candidate: a densely populated cell doing that
+			// sequentially is what saturates the connection pool under
+			// real load, adding a full network round trip per candidate
+			// serialized before ranking can even begin.
+			drivers, err := lookup.GetDrivers(ctx, ids)
+			if err != nil {
+				return nil, fmt.Errorf("get drivers in cell %s: %w", cell, err)
+			}
 			for _, id := range ids {
-				d, err := lookup.GetDriver(ctx, id)
-				if err != nil {
-					if err == store.ErrDriverNotFound {
-						continue // aged out between the set read and this lookup
-					}
-					return nil, fmt.Errorf("get driver %s: %w", id, err)
+				d, ok := drivers[id]
+				if !ok {
+					continue // aged out between the set read and this lookup
 				}
 				if d.State == statemachine.DriverAvailable {
 					candidates = append(candidates, d)
