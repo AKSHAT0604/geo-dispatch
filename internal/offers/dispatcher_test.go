@@ -231,6 +231,57 @@ func TestDispatcherMarksTripUnfulfilledWhenEveryCandidateTimesOut(t *testing.T) 
 	}
 }
 
+// TestDispatcherTreatsExpiredOfferRecordAsTimeout guards against a real bug
+// found running against production Redis (not miniredis - this exact race
+// didn't reproduce there): the offer record's Redis TTL and the offer
+// window used to be equal, so under real network latency Redis could
+// expire the record before the dispatcher's own timeout logic reached
+// SetOfferState, turning a normal timeout into a hard RPC error. Forces
+// the record to have already expired (via miniredis's virtual clock) well
+// before the real timer fires, to prove the grace-buffered TTL and the
+// defensive ErrOfferNotFound handling both do their job.
+func TestDispatcherTreatsExpiredOfferRecordAsTimeout(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	drivers := store.NewDriverStore(rdb, 8)
+	trips := store.NewTripStore(rdb)
+	offerStore := store.NewOfferStore(rdb)
+	hub := NewResponseHub()
+	dispatcher := NewDispatcher(offerStore, trips, drivers, hub, nil, fastConfig)
+	ctx := context.Background()
+
+	if err := drivers.UpdateLocation(ctx, "driver-1", 17.3850, 78.4867); err != nil {
+		t.Fatalf("UpdateLocation: %v", err)
+	}
+	trip, err := trips.CreateTrip(ctx, "rider-1", 17.3850, 78.4867, "idem-key")
+	if err != nil {
+		t.Fatalf("CreateTrip: %v", err)
+	}
+
+	candidates := []matching.RankedCandidate{{Driver: &store.DriverRecord{DriverID: "driver-1"}}}
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		mr.FastForward(fastConfig.OfferWindow + offerRecordGrace + time.Second)
+	}()
+
+	matched, _, err := dispatcher.Run(ctx, trip.TripID, testOriginCell, candidates)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if matched {
+		t.Fatalf("Run matched, want unfulfilled since driver-1 never responded")
+	}
+
+	finalTrip, err := trips.GetTrip(ctx, trip.TripID)
+	if err != nil {
+		t.Fatalf("GetTrip: %v", err)
+	}
+	if finalTrip.State != statemachine.TripUnfulfilled {
+		t.Fatalf("trip state = %s, want UNFULFILLED", finalTrip.State)
+	}
+}
+
 // TestDispatcherSkipsCandidateClaimedByConcurrentDispatch guards against a
 // real race found under load testing: candidate search ranks a snapshot of
 // AVAILABLE drivers before any offer is made, so two concurrent trips can

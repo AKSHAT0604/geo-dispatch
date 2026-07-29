@@ -31,6 +31,16 @@ var DefaultConfig = Config{
 	MaxBackoff:  10 * time.Second,
 }
 
+// offerRecordGrace is added on top of Cfg.OfferWindow when setting the
+// offer record's Redis TTL. The offer window and the TTL are different
+// concerns - "how long a driver has to respond" versus "how long the
+// record needs to exist to still be writable" - and setting them equal
+// caused a real race under production network latency: Redis expiring the
+// key at the same instant the Go timer fires leaves no room for the
+// dispatcher's own timeout handling to reach SetOfferState before the
+// record is already gone.
+const offerRecordGrace = 10 * time.Second
+
 // Dispatcher runs the offer/reoffer loop for a trip against a pre-ranked
 // list of candidates.
 type Dispatcher struct {
@@ -118,7 +128,7 @@ func (d *Dispatcher) Run(ctx context.Context, tripID string, originCell h3.Cell,
 
 		roundsAttempted++
 		round := roundsAttempted
-		if err := d.Offers.CreateOffer(ctx, tripID, driverID, round, d.Cfg.OfferWindow); err != nil {
+		if err := d.Offers.CreateOffer(ctx, tripID, driverID, round, d.Cfg.OfferWindow+offerRecordGrace); err != nil {
 			return false, "", fmt.Errorf("create offer round %d: %w", round, err)
 		}
 		d.publishOffer(ctx, tripID, driverID, round, originCell, statemachine.OfferPending)
@@ -147,7 +157,13 @@ func (d *Dispatcher) Run(ctx context.Context, tripID string, originCell h3.Cell,
 			}
 			d.publishOffer(ctx, tripID, driverID, round, originCell, statemachine.OfferDeclined)
 		default: // NoResponse: the offer window elapsed.
-			if err := d.Offers.SetOfferState(ctx, tripID, driverID, statemachine.OfferTimedOut); err != nil {
+			// ErrOfferNotFound here means the record's TTL already elapsed
+			// despite the grace buffer - under enough latency this can
+			// still happen. Functionally identical to a normal timeout:
+			// the offer is gone either way, so treat it as one rather than
+			// failing the whole dispatch over a record that was only ever
+			// there for observability.
+			if err := d.Offers.SetOfferState(ctx, tripID, driverID, statemachine.OfferTimedOut); err != nil && err != store.ErrOfferNotFound {
 				return false, "", fmt.Errorf("time out offer: %w", err)
 			}
 			d.publishOffer(ctx, tripID, driverID, round, originCell, statemachine.OfferTimedOut)
