@@ -47,9 +47,14 @@ curl -X POST localhost:8081/drivers/driver-1/offer/respond -d '{"response":"ACCE
 
 ## Benchmarks
 
-Headline numbers, including three concurrency bugs load testing caught and fixed
-before they shipped, are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Surge pricing's
-rise-and-decay curve under synthetic demand is in [docs/SURGE.md](docs/SURGE.md).
+Measured against the real `docker-compose` stack: 50,000 drivers held with a 100% match
+rate and zero request errors, and a 4-node cluster rebalancing in 4.97s after a live
+node kill with no in-flight trip lost. Five concurrency bugs load testing caught and
+fixed along the way - three only reproduced against real Docker-hosted Redis, never
+against an in-process fake - are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md), read
+honestly rather than as a resume-ready headline (it says exactly what wasn't measured
+too). Surge pricing's rise-and-decay curve under synthetic demand is in
+[docs/SURGE.md](docs/SURGE.md).
 
 ## Design decisions
 
