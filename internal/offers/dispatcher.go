@@ -142,7 +142,20 @@ func (d *Dispatcher) Run(ctx context.Context, tripID string, originCell h3.Cell,
 			}
 			d.publishOffer(ctx, tripID, driverID, round, originCell, statemachine.OfferAccepted)
 			if err := d.Drivers.SetState(ctx, driverID, statemachine.DriverEnRoute); err != nil {
-				return false, "", fmt.Errorf("move driver %s en route: %w", driverID, err)
+				if _, ok := err.(statemachine.ErrIllegalDriverTransition); !ok {
+					return false, "", fmt.Errorf("move driver %s en route: %w", driverID, err)
+				}
+				// Observed under extreme concurrent load (~0.6% of
+				// requests at 50k drivers / 500 req/s) - the exact
+				// mechanism isn't fully root-caused, but the offer/trip
+				// records (this trip's actual source of truth) are
+				// unaffected by it: this trip really was offered to
+				// driverID and really did receive Accepted for that
+				// specific offer, so the match is real regardless of
+				// what state driverID's own record races into. Failing
+				// the whole RPC over a denormalized field on the driver
+				// side would be a worse outcome than a state field that's
+				// briefly stale until the driver's next update.
 			}
 			if err := d.Trips.MarkMatched(ctx, tripID, driverID); err != nil {
 				return false, "", fmt.Errorf("mark trip matched: %w", err)
@@ -174,7 +187,12 @@ func (d *Dispatcher) Run(ctx context.Context, tripID string, originCell h3.Cell,
 		// pre-ranked candidate, so exclusion falls out of the loop
 		// structure rather than needing an explicit exclude-list.
 		if err := d.Drivers.SetState(ctx, driverID, statemachine.DriverAvailable); err != nil {
-			return false, "", fmt.Errorf("release driver %s: %w", driverID, err)
+			if _, ok := err.(statemachine.ErrIllegalDriverTransition); !ok {
+				return false, "", fmt.Errorf("release driver %s: %w", driverID, err)
+			}
+			// Already moved to some other state for a reason outside this
+			// trip (see the matching comment on the Accepted branch above)
+			// - there's nothing left for this trip to release.
 		}
 
 		if i+1 < len(candidates) && roundsAttempted < d.Cfg.MaxRounds {

@@ -282,6 +282,113 @@ func TestDispatcherTreatsExpiredOfferRecordAsTimeout(t *testing.T) {
 	}
 }
 
+// TestDispatcherToleratesDriverStateRaceOnAccept guards against a bug found
+// running the full 50,000-driver benchmark against real Docker-hosted
+// Redis: under enough concurrent load, a driver's own state can move to
+// EN_ROUTE for a reason outside a given trip before that trip's own accept
+// handling reaches SetState. The trip's offer really was accepted for that
+// specific trip regardless, so it must still resolve as a match rather
+// than hard-failing the whole RPC over a denormalized state field.
+func TestDispatcherToleratesDriverStateRaceOnAccept(t *testing.T) {
+	dispatcher, drivers, trips := newTestDispatcher(t, fastConfig, nil)
+	ctx := context.Background()
+
+	if err := drivers.UpdateLocation(ctx, "driver-1", 17.3850, 78.4867); err != nil {
+		t.Fatalf("UpdateLocation: %v", err)
+	}
+	trip, err := trips.CreateTrip(ctx, "rider-1", 17.3850, 78.4867, "idem-key")
+	if err != nil {
+		t.Fatalf("CreateTrip: %v", err)
+	}
+
+	candidates := []matching.RankedCandidate{{Driver: &store.DriverRecord{DriverID: "driver-1"}}}
+
+	// Race a competing transition in as soon as the driver is offered, to
+	// win ahead of this trip's own (slower: offer poll, hub round trip,
+	// SetOfferState) path to SetState(EnRoute).
+	go func() {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			d, err := drivers.GetDriver(ctx, "driver-1")
+			if err == nil && d.State == statemachine.DriverOffered {
+				drivers.SetState(ctx, "driver-1", statemachine.DriverEnRoute)
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+	go acceptWhenOffered(t, dispatcher, trip.TripID, "driver-1")
+
+	matched, driverID, err := dispatcher.Run(ctx, trip.TripID, testOriginCell, candidates)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !matched || driverID != "driver-1" {
+		t.Fatalf("Run = matched=%v driverID=%s, want matched=true driverID=driver-1", matched, driverID)
+	}
+
+	finalTrip, err := trips.GetTrip(ctx, trip.TripID)
+	if err != nil {
+		t.Fatalf("GetTrip: %v", err)
+	}
+	if finalTrip.State != statemachine.TripMatched || finalTrip.MatchedDriverID != "driver-1" {
+		t.Fatalf("trip = %+v, want MATCHED with driver-1", finalTrip)
+	}
+}
+
+// TestDispatcherToleratesDriverStateRaceOnRelease is the same tolerance on
+// the decline/timeout release path: releasing a driver back to AVAILABLE
+// must not hard-fail the trip if the driver's state already moved on for a
+// reason outside this trip.
+func TestDispatcherToleratesDriverStateRaceOnRelease(t *testing.T) {
+	dispatcher, drivers, trips := newTestDispatcher(t, fastConfig, nil)
+	ctx := context.Background()
+
+	if err := drivers.UpdateLocation(ctx, "driver-1", 17.3850, 78.4867); err != nil {
+		t.Fatalf("UpdateLocation driver-1: %v", err)
+	}
+	if err := drivers.UpdateLocation(ctx, "driver-2", 17.3860, 78.4870); err != nil {
+		t.Fatalf("UpdateLocation driver-2: %v", err)
+	}
+	trip, err := trips.CreateTrip(ctx, "rider-1", 17.3850, 78.4867, "idem-key")
+	if err != nil {
+		t.Fatalf("CreateTrip: %v", err)
+	}
+
+	candidates := []matching.RankedCandidate{
+		{Driver: &store.DriverRecord{DriverID: "driver-1"}},
+		{Driver: &store.DriverRecord{DriverID: "driver-2"}},
+	}
+
+	// driver-1 never responds (times out). Race it directly to OFFERED
+	// (simulating a concurrent trip claiming it) as soon as it's back to
+	// AVAILABLE, ahead of this trip's own release call reaching it.
+	go func() {
+		deadline := time.Now().Add(3 * time.Second)
+		seenOffered := false
+		for time.Now().Before(deadline) {
+			d, err := drivers.GetDriver(ctx, "driver-1")
+			if err == nil && d.State == statemachine.DriverOffered {
+				seenOffered = true
+			}
+			if err == nil && seenOffered && d.State == statemachine.DriverAvailable {
+				drivers.SetState(ctx, "driver-1", statemachine.DriverOffered)
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+	go acceptWhenOffered(t, dispatcher, trip.TripID, "driver-2")
+
+	matched, driverID, err := dispatcher.Run(ctx, trip.TripID, testOriginCell, candidates)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !matched || driverID != "driver-2" {
+		t.Fatalf("Run = matched=%v driverID=%s, want matched=true driverID=driver-2", matched, driverID)
+	}
+}
+
 // TestDispatcherSkipsCandidateClaimedByConcurrentDispatch guards against a
 // real race found under load testing: candidate search ranks a snapshot of
 // AVAILABLE drivers before any offer is made, so two concurrent trips can
